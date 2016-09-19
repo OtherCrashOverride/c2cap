@@ -1,0 +1,23 @@
+c2cap - Captures video from a V4L2 device and compresses it to a h264 bitstream
+		using the S905 hardware codec.
+
+Usage:
+
+	./c2cap [-d v4l2_device_name] [-o output_file_name]
+	
+	Captures and writes a h264 bitstream.  V4L2_device_name can be any capture
+	device that supports YUYV surfaces. The special file_name "-" outputs to
+	stdout instead of a file.  This is useful for piping the data to another
+	program such a ffmpeg.  If no V4L2 device is specified, the default of
+	"/dev/video0" is used.  If no output file is specified, "default.h264" is
+	used.
+
+	The h264 bitstream output does *not* include framerate information.  This
+	will need to specified in the container when muxing.
+
+	test_main() illustrates the simplest use of the API taking a single image
+	and converting it to a h264 bitstream.  The image must be in NV12 format.
+	
+	The following command can be used to onvert an image to NV12 format:
+		ffmpeg -i maxresdefault.jpg -pix_fmt nv12 maxresdefault.yuv
+
