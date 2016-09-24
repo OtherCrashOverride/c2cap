@@ -17,16 +17,64 @@
 #include <linux/videodev2.h> // V4L
 #include <sys/mman.h>	// mmap
 
+// The headers are not aware C++ exists
+extern "C"
+{
+	//#include <amcodec/codec.h>
+#include <codec.h>
+}
+// Codec parameter flags
+//    size_t is used to make it 
+//    64bit safe for use on Odroid C2
+const size_t EXTERNAL_PTS = 0x01;
+const size_t SYNC_OUTSIDE = 0x02;
+const size_t USE_IDR_FRAMERATE = 0x04;
+const size_t UCODE_IP_ONLY_PARAM = 0x08;
+const size_t MAX_REFER_BUF = 0x10;
+const size_t ERROR_RECOVERY_MODE_IN = 0x20;
 
 
 const char* DEFAULT_DEVICE = "/dev/video0";
 const char* DEFAULT_OUTPUT = "default.h264";
-const int BUFFER_COUNT = 8;
+const int BUFFER_COUNT = 16;
 
 const int DEFAULT_WIDTH = 640;
 const int DEFAULT_HEIGHT = 480;
 const int DEFAULT_FRAME_RATE = 30;
 const int DEFAULT_BITRATE = 1000000 * 5;
+
+
+
+const size_t MJpegDhtLength = 0x1A4;
+unsigned char MJpegDht[MJpegDhtLength] = {
+	/* JPEG DHT Segment for YCrCb omitted from MJPG data */
+	0xFF,0xC4,0x01,0xA2,
+	0x00,0x00,0x01,0x05,0x01,0x01,0x01,0x01,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+	0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x01,0x00,0x03,0x01,0x01,0x01,0x01,
+	0x01,0x01,0x01,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+	0x08,0x09,0x0A,0x0B,0x10,0x00,0x02,0x01,0x03,0x03,0x02,0x04,0x03,0x05,0x05,0x04,0x04,0x00,
+	0x00,0x01,0x7D,0x01,0x02,0x03,0x00,0x04,0x11,0x05,0x12,0x21,0x31,0x41,0x06,0x13,0x51,0x61,
+	0x07,0x22,0x71,0x14,0x32,0x81,0x91,0xA1,0x08,0x23,0x42,0xB1,0xC1,0x15,0x52,0xD1,0xF0,0x24,
+	0x33,0x62,0x72,0x82,0x09,0x0A,0x16,0x17,0x18,0x19,0x1A,0x25,0x26,0x27,0x28,0x29,0x2A,0x34,
+	0x35,0x36,0x37,0x38,0x39,0x3A,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4A,0x53,0x54,0x55,0x56,
+	0x57,0x58,0x59,0x5A,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x73,0x74,0x75,0x76,0x77,0x78,
+	0x79,0x7A,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8A,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,
+	0x9A,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xB2,0xB3,0xB4,0xB5,0xB6,0xB7,0xB8,0xB9,
+	0xBA,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,
+	0xDA,0xE1,0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,
+	0xF8,0xF9,0xFA,0x11,0x00,0x02,0x01,0x02,0x04,0x04,0x03,0x04,0x07,0x05,0x04,0x04,0x00,0x01,
+	0x02,0x77,0x00,0x01,0x02,0x03,0x11,0x04,0x05,0x21,0x31,0x06,0x12,0x41,0x51,0x07,0x61,0x71,
+	0x13,0x22,0x32,0x81,0x08,0x14,0x42,0x91,0xA1,0xB1,0xC1,0x09,0x23,0x33,0x52,0xF0,0x15,0x62,
+	0x72,0xD1,0x0A,0x16,0x24,0x34,0xE1,0x25,0xF1,0x17,0x18,0x19,0x1A,0x26,0x27,0x28,0x29,0x2A,
+	0x35,0x36,0x37,0x38,0x39,0x3A,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4A,0x53,0x54,0x55,0x56,
+	0x57,0x58,0x59,0x5A,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0x6A,0x73,0x74,0x75,0x76,0x77,0x78,
+	0x79,0x7A,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8A,0x92,0x93,0x94,0x95,0x96,0x97,0x98,
+	0x99,0x9A,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xB2,0xB3,0xB4,0xB5,0xB6,0xB7,0xB8,
+	0xB9,0xBA,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,
+	0xD9,0xDA,0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,
+	0xF9,0xFA
+};
+
 
 struct BufferMapping
 {
@@ -55,6 +103,47 @@ public:
 	}
 
 };
+
+
+codec_para_t codecContext;
+void OpenCodec(int width, int height, int fps)
+{
+	fps *= 2;
+
+	// Initialize the codec
+	codecContext = { 0 };
+
+
+	codecContext.stream_type = STREAM_TYPE_ES_VIDEO;
+	codecContext.video_type = VFORMAT_MJPEG;
+	codecContext.has_video = 1;
+	codecContext.noblock = 0;
+	codecContext.am_sysinfo.format = VIDEO_DEC_FORMAT_MJPEG;
+	codecContext.am_sysinfo.width = width;
+	codecContext.am_sysinfo.height = height;
+	codecContext.am_sysinfo.rate = (96000.0 / fps);	
+	codecContext.am_sysinfo.param = (void*)( SYNC_OUTSIDE); //EXTERNAL_PTS |
+
+
+	int api = codec_init(&codecContext);
+	if (api != 0)
+	{
+		throw Exception("codec_init failed.");		
+	}
+}
+
+void WriteCodecData(unsigned char* data, int dataLength)
+{
+	int offset = 0;
+	while (offset < dataLength)
+	{
+		int count = codec_write(&codecContext, data + offset, dataLength - offset);
+		if (count > 0)
+		{
+			offset += count;
+		}
+	}
+}
 
 
 int main(int argc, char** argv)
@@ -197,7 +286,8 @@ int main(int argc, char** argv)
 	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	format.fmt.pix.width = width;
 	format.fmt.pix.height = height;
-	format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+	//format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+	format.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
 	//format.fmt.pix.field = V4L2_FIELD_ANY;
 
 	io = ioctl(captureDev, VIDIOC_S_FMT, &format);
@@ -278,9 +368,11 @@ int main(int argc, char** argv)
 	}
 
 
+	// Create MJPEG codec
+	OpenCodec(width, height, fps);
 
-	// Create an output file
-	
+
+	// Create an output file	
 	int fdOut;
 	
 	if (std::strcmp(output, "-") == 0)
@@ -298,6 +390,8 @@ int main(int argc, char** argv)
 		}
 	}
 
+
+#if 0
 	// Initialize the encoder
 	vl_codec_id_t codec_id = CODEC_ID_H264;
 	width = format.fmt.pix.width;
@@ -313,6 +407,7 @@ int main(int argc, char** argv)
 	vl_img_format_t img_format = IMG_FMT_NV12;
 	vl_codec_handle_t handle = vl_video_encoder_init(codec_id, width, height, fps, bitrate, gop, img_format);
 	fprintf(stderr, "handle = %ld\n", handle);
+#endif
 
 
 	// Start streaming
@@ -333,6 +428,10 @@ int main(int argc, char** argv)
 	char encodeBuffer[ENCODE_BUFFER_SIZE];
 	//fprintf(stderr, "ENCODEC_BUFFER_SIZE = %d\n", ENCODEC_BUFFER_SIZE);
 
+	
+	bool isFirstFrame = true;
+	bool needsMJpegDht = true;
+
 	while (true)
 	{
 		// get buffer
@@ -346,7 +445,7 @@ int main(int argc, char** argv)
 			throw Exception("VIDIOC_DQBUF failed.");
 		}
 
-
+#if 0
 		// Process frame
 		//printf("Got a buffer: index = %d\n", buffer.index);
 		unsigned short* data = (unsigned short*)bufferMappings[buffer.index].Start;
@@ -395,7 +494,74 @@ int main(int argc, char** argv)
 				throw Exception("write failed.");
 			}
 		}
+#endif
 		
+		// MJPEG
+		unsigned char* data = (unsigned char*)bufferMappings[buffer.index].Start;
+		size_t dataLength = buffer.bytesused; //bufferMappings[buffer.index].Length;
+		
+		//printf("dataLength=%lu\n", dataLength);
+
+		if (isFirstFrame)
+		{
+			unsigned char* scan = data;
+			while (scan < data + dataLength - 4)
+			{
+				if (scan[0] == MJpegDht[0] &&
+					scan[1] == MJpegDht[1] &&
+					scan[2] == MJpegDht[2] &&
+					scan[3] == MJpegDht[3])
+				{
+					needsMJpegDht = false;
+					break;
+				}
+
+				++scan;
+			}
+
+			isFirstFrame = false;
+
+			fprintf(stderr, "needsMjpegDht = %d\n", needsMJpegDht);
+		}
+
+#if 0
+		ssize_t writeCount = write(fdOut, data, buffer.bytesused);
+		if (writeCount < 0)
+		{
+			throw Exception("write failed.");
+		}
+#endif
+
+
+		if (needsMJpegDht)
+		{
+			// Find the start of scan (SOS)
+			unsigned char* sos = data;
+			while (sos < data + dataLength - 1)
+			{
+				if (sos[0] == 0xff && sos[1] == 0xda)
+					break;
+
+				++sos;
+			}
+
+			// Send everthing up to SOS
+			int headerLength = sos - data;
+			WriteCodecData(data, headerLength);
+
+			// Send DHT
+			WriteCodecData(MJpegDht, MJpegDhtLength);
+
+			// Send remaining data
+			WriteCodecData(sos, dataLength - headerLength);
+
+			//printf("dataLength=%lu, found SOS @ %d\n", dataLength, headerLength);
+		}
+		else
+		{
+			WriteCodecData(data, dataLength);
+		}
+
 
 		// return buffer
 		io = ioctl(captureDev, VIDIOC_QBUF, &buffer);
@@ -408,85 +574,3 @@ int main(int argc, char** argv)
 
 	return 0;
 }
-
-
-#if 0
-int test_main()
-{
-	// Load the NV12 test data
-	int fd = open("maxresdefault.yuv", O_RDONLY);
-	if (fd < 0)
-	{
-		printf("open failed.\n");
-		throw std::exception();
-	}
-
-	off_t length = lseek(fd, 0, SEEK_END);
-	lseek(fd, 0, SEEK_SET);
-
-	std::vector<char> data(length);
-	ssize_t cnt = read(fd, &data[0], length);
-
-	close(fd);
-
-	if (cnt != length)
-	{
-		printf("read failed.\n");
-		throw std::exception();
-	}
-
-
-	// Create an output file
-	mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-	int fdOut = open("test.h264", O_CREAT| O_TRUNC | O_WRONLY, mode);
-	if (fdOut < 0)
-	{
-		printf("open test.h24 failed\n");
-		throw std::exception();
-	}
-
-
-	// Initialize the encoder
-	vl_codec_id_t codec_id = CODEC_ID_H264;
-	int width = 1280;
-	int height = 720;
-	int frame_rate = 30;
-	int bit_rate = 1000000 * 10;
-	int gop = 10;
-	vl_img_format_t img_format = IMG_FMT_NV12;
-
-	vl_codec_handle_t handle = vl_video_encoder_init(codec_id, width, height, frame_rate, bit_rate, gop, img_format);
-	printf("handle = %ld\n", handle);
-
-	
-	// Encode the video frames
-	const int BUFFER_SIZE = 1024 * 32;
-	char buffer[BUFFER_SIZE];
-	for (int i = 0; i < 30 * 30; ++i)
-	{
-		vl_frame_type_t type = FRAME_TYPE_AUTO;
-		char* in = &data[0];
-		int in_size = BUFFER_SIZE;
-		char* out = buffer;
-		int outCnt = vl_video_encoder_encode(handle, type, in, in_size, &out);
-		printf("vl_video_encoder_encode = %d\n", outCnt);
-
-		if (outCnt > 0)
-		{
-			write(fdOut, buffer, outCnt);
-		}
-	}
-
-
-	// Close the decoder
-	int vl_video_encoder_destory(handle);
-
-
-	// Close the output file
-	close(fdOut);
-
-	return 0;
-}
-
-#endif
-
