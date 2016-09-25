@@ -1,5 +1,7 @@
 // g++ -g main.cpp -o c2cap -l vpcodec
 // ffmpeg -framerate 60 -i test.h264 -vcodec copy test.mp4
+// sudo apt install libjpeg-turbo8-dev
+
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -33,10 +35,13 @@ const size_t UCODE_IP_ONLY_PARAM = 0x08;
 const size_t MAX_REFER_BUF = 0x10;
 const size_t ERROR_RECOVERY_MODE_IN = 0x20;
 
+#include <turbojpeg.h>
+#include <memory>
+
 
 const char* DEFAULT_DEVICE = "/dev/video0";
 const char* DEFAULT_OUTPUT = "default.h264";
-const int BUFFER_COUNT = 16;
+const int BUFFER_COUNT = 4;
 
 const int DEFAULT_WIDTH = 640;
 const int DEFAULT_HEIGHT = 480;
@@ -108,7 +113,7 @@ public:
 codec_para_t codecContext;
 void OpenCodec(int width, int height, int fps)
 {
-	fps *= 2;
+	//fps *= 2;
 
 	// Initialize the codec
 	codecContext = { 0 };
@@ -143,6 +148,38 @@ void WriteCodecData(unsigned char* data, int dataLength)
 			offset += count;
 		}
 	}
+}
+
+
+timeval startTime;
+timeval endTime;
+
+void ResetTime()
+{
+	gettimeofday(&startTime, NULL);
+	endTime = startTime;
+}
+
+float GetTime()
+{
+	gettimeofday(&endTime, NULL);
+	float seconds = (endTime.tv_sec - startTime.tv_sec);
+	float milliseconds = (float(endTime.tv_usec - startTime.tv_usec)) / 1000000.0f;
+
+	startTime = endTime;
+
+	return seconds + milliseconds;
+}
+
+float ConvertTimeval(timeval* value)
+{
+	if (value == nullptr)
+		throw Exception("value is null.");
+
+	float seconds = value->tv_sec;
+	float milliseconds = ((float)value->tv_usec) / 1000000.0f;
+
+	return seconds + milliseconds;
 }
 
 
@@ -288,7 +325,7 @@ int main(int argc, char** argv)
 	format.fmt.pix.height = height;
 	//format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
 	format.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-	//format.fmt.pix.field = V4L2_FIELD_ANY;
+	format.fmt.pix.field = V4L2_FIELD_ANY; //V4L2_FIELD_INTERLACED; //V4L2_FIELD_ANY; V4L2_FIELD_ALTERNATE
 
 	io = ioctl(captureDev, VIDIOC_S_FMT, &format);
 	if (io < 0)
@@ -391,7 +428,7 @@ int main(int argc, char** argv)
 	}
 
 
-#if 0
+#if 1
 	// Initialize the encoder
 	vl_codec_id_t codec_id = CODEC_ID_H264;
 	width = format.fmt.pix.width;
@@ -421,16 +458,30 @@ int main(int argc, char** argv)
 
 
 	int nv12Size = format.fmt.pix.width * format.fmt.pix.height * 4;
-	unsigned char nv12[nv12Size];
+	unsigned char* nv12 = new unsigned char[nv12Size];
 	fprintf(stderr, "nv12Size = %d\n", nv12Size);
 
 	int ENCODE_BUFFER_SIZE = nv12Size; //1024 * 32;
-	char encodeBuffer[ENCODE_BUFFER_SIZE];
+	char* encodeBuffer = new char[ENCODE_BUFFER_SIZE];
 	//fprintf(stderr, "ENCODEC_BUFFER_SIZE = %d\n", ENCODEC_BUFFER_SIZE);
 
-	
+
+	// jpeg-turbo
+	tjhandle jpegDecompressor = tjInitDecompress();
+	int jpegWidth = 0;
+	int jpegHeight = 0;
+	int jpegSubsamp = 0;
+	int jpegColorspace = 0;
+	unsigned char* jpegYuv = nullptr;
+	unsigned long jpegYuvSize = 0;
+
+
 	bool isFirstFrame = true;
 	bool needsMJpegDht = true;
+	int frames = 0;
+	float totalTime = 0;
+	float lastTimestamp = 0;
+	ResetTime();
 
 	while (true)
 	{
@@ -444,6 +495,26 @@ int main(int argc, char** argv)
 		{
 			throw Exception("VIDIOC_DQBUF failed.");
 		}
+
+
+		float timestamp = ConvertTimeval(&buffer.timestamp);
+		float elapsedTime = timestamp - lastTimestamp;
+
+		printf("Got a buffer: index=%d, timestamp=%f, elapsed=%f\n", buffer.index, timestamp, elapsedTime);
+
+		/*
+		__u32	type	Frame rate the timecodes are based on, see Table 3-6.
+		__u32	flags	Timecode flags, see Table 3-7.
+		__u8	frames	Frame count, 0 ... 23/24/29/49/59, depending on the type of timecode.
+		__u8	seconds	Seconds count, 0 ... 59. This is a binary, not BCD number.
+		__u8	minutes	Minutes count, 0 ... 59. This is a binary, not BCD number.
+		__u8	hours	Hours count, 0 ... 29. This is a binary, not BCD number.
+		__u8	userbits[4]	The "user group" bits from the timecode.
+		*/
+		//printf("\ttype=%d, flags=%d, frames=%d, seconds=%d, minutes=%d, hours=%d\n",
+		//	buffer.timecode.type, buffer.timecode.flags, buffer.timecode.frames, buffer.timecode.seconds, buffer.timecode.minutes, buffer.timecode.hours);
+
+		lastTimestamp = timestamp;
 
 #if 0
 		// Process frame
@@ -522,6 +593,42 @@ int main(int argc, char** argv)
 			isFirstFrame = false;
 
 			fprintf(stderr, "needsMjpegDht = %d\n", needsMJpegDht);
+
+			// jpeg-turbo
+			//int jpegWidth;
+			//int jpegHeight;
+			//int jpegSubsamp;
+			//int jpegColorspace;
+
+			int api = tjDecompressHeader3(jpegDecompressor,
+				data,
+				dataLength,
+				&jpegWidth,
+				&jpegHeight,
+				&jpegSubsamp,
+				&jpegColorspace);
+			if (api != 0)
+			{
+				char* message = tjGetErrorStr();
+				fprintf(stderr, "tjDecompressHeader3 failed (%s)\n", message);
+			}
+			else
+			{
+				fprintf(stderr, "jpegWidth=%d jpegHeight=%d jpegSubsamp=%d jpegColorspace=%d\n",
+					jpegWidth, jpegHeight, jpegSubsamp, jpegColorspace);
+			}
+
+			// TODO: fail if not YUV422
+
+			unsigned long jpegYuvSize = tjBufSizeYUV2(jpegWidth,
+				1,
+				jpegHeight,
+				jpegSubsamp);
+
+			jpegYuv = new unsigned char[jpegYuvSize];
+			
+			fprintf(stderr, "jpegYuv=%p jpegYuvSize=%lu\n",
+				jpegYuv, jpegYuvSize);
 		}
 
 #if 0
@@ -533,6 +640,7 @@ int main(int argc, char** argv)
 #endif
 
 
+#if 0
 		if (needsMJpegDht)
 		{
 			// Find the start of scan (SOS)
@@ -561,6 +669,78 @@ int main(int argc, char** argv)
 		{
 			WriteCodecData(data, dataLength);
 		}
+#endif
+
+
+		// jpeg-turbo
+		int api = tjDecompressToYUV2(jpegDecompressor,
+			data,
+			dataLength,
+			jpegYuv,
+			jpegWidth,
+			1,
+			jpegHeight,
+			TJFLAG_FASTDCT);	//TJFLAG_ACCURATEDCT
+		if (api != 0)
+		{
+			char* message = tjGetErrorStr();
+			fprintf(stderr, "tjDecompressToYUV2 failed (%s)\n", message);
+		}
+		else
+		{
+			// convert YUV422 to NV12
+			int srcStride = format.fmt.pix.width;
+			unsigned char* srcY = jpegYuv;
+			unsigned char* srcU = srcY + (format.fmt.pix.width * format.fmt.pix.height);
+			unsigned char* srcV = srcU + ((format.fmt.pix.width / 2) * format.fmt.pix.height);
+
+			int dstStride = format.fmt.pix.width;
+			int dstVUOffset = format.fmt.pix.width * format.fmt.pix.height;
+
+			for (int y = 0; y < format.fmt.pix.height; ++y)
+			{
+				for (int x = 0; x < format.fmt.pix.width; x += 2)
+				{
+					int srcIndex = y * srcStride + x;
+					int chromaIndex = y * (srcStride >> 1) + (x >> 1);
+
+					//unsigned char l = data[srcIndex];
+					unsigned short yu = srcY[srcIndex] | (srcU[chromaIndex] << 8);
+					unsigned short yv = srcY[srcIndex + 1] | (srcV[chromaIndex] << 8);
+
+
+					int dstIndex = y * dstStride + (x);
+					nv12[dstIndex] = yu & 0xff;
+					nv12[dstIndex + 1] = yv & 0xff;
+
+					if (y % 2 == 0)
+					{
+						int dstVUIndex = (y >> 1) * dstStride + (x);
+						nv12[dstVUOffset + dstVUIndex] = yv >> 8;
+						nv12[dstVUOffset + dstVUIndex + 1] = yu >> 8;
+					}
+				}
+			}
+
+#if 1
+			// Encode the video frames
+			vl_frame_type_t type = FRAME_TYPE_AUTO;
+			char* in = (char*)&nv12[0];
+			int in_size = ENCODE_BUFFER_SIZE;
+			char* out = encodeBuffer;
+			int outCnt = vl_video_encoder_encode(handle, type, in, in_size, &out);
+			//printf("vl_video_encoder_encode = %d\n", outCnt);
+
+			if (outCnt > 0)
+			{
+				ssize_t writeCount = write(fdOut, encodeBuffer, outCnt);
+				if (writeCount < 0)
+				{
+					throw Exception("write failed.");
+				}
+			}
+#endif
+		}
 
 
 		// return buffer
@@ -568,6 +748,20 @@ int main(int argc, char** argv)
 		if (io < 0)
 		{
 			throw Exception("VIDIOC_QBUF failed.");
+		}
+
+
+		// Measure FPS
+		++frames;
+		totalTime += GetTime();
+
+		if (totalTime >= 1.0f)
+		{
+			int fps = (int)(frames / totalTime);
+			fprintf(stderr, "FPS: %i\n", fps);
+
+			frames = 0;
+			totalTime = 0;
 		}
 	}
 
