@@ -39,6 +39,12 @@ const size_t ERROR_RECOVERY_MODE_IN = 0x20;
 #include <memory>
 
 
+#include "Exception.h"
+#include "Stopwatch.h"
+#include "Timer.h"
+#include "Mutex.h"
+
+
 const char* DEFAULT_DEVICE = "/dev/video0";
 const char* DEFAULT_OUTPUT = "default.h264";
 const int BUFFER_COUNT = 4;
@@ -98,16 +104,16 @@ struct option longopts[] = {
 	{ 0, 0, 0, 0 }
 };
 
-class Exception : public std::exception
-{
-public:
-	Exception(const char* message)
-		: std::exception()
-	{
-		fprintf(stderr, "%s\n", message);
-	}
-
-};
+//class Exception : public std::exception
+//{
+//public:
+//	Exception(const char* message)
+//		: std::exception()
+//	{
+//		fprintf(stderr, "%s\n", message);
+//	}
+//
+//};
 
 
 codec_para_t codecContext;
@@ -151,37 +157,74 @@ void WriteCodecData(unsigned char* data, int dataLength)
 }
 
 
-timeval startTime;
-timeval endTime;
+//timeval startTime;
+//timeval endTime;
+//
+//void ResetTime()
+//{
+//	gettimeofday(&startTime, NULL);
+//	endTime = startTime;
+//}
+//
+//float GetTime()
+//{
+//	gettimeofday(&endTime, NULL);
+//	float seconds = (endTime.tv_sec - startTime.tv_sec);
+//	float milliseconds = (float(endTime.tv_usec - startTime.tv_usec)) / 1000000.0f;
+//
+//	startTime = endTime;
+//
+//	return seconds + milliseconds;
+//}
 
-void ResetTime()
+//float ConvertTimeval(timeval* value)
+//{
+//	if (value == nullptr)
+//		throw Exception("value is null.");
+//
+//	float seconds = value->tv_sec;
+//	float milliseconds = ((float)value->tv_usec) / 1000000.0f;
+//
+//	return seconds + milliseconds;
+//}
+
+
+vl_codec_handle_t handle;
+int encoderFileDescriptor = -1;
+unsigned char* encodeNV12Buffer = nullptr;
+char* encodeBitstreamBuffer = nullptr;
+size_t encodeBitstreamBufferLength = 0;
+Mutex encodeMutex;
+
+void EncodeFrame()
 {
-	gettimeofday(&startTime, NULL);
-	endTime = startTime;
+	encodeMutex.Lock();
+
+	// Encode the video frames
+	vl_frame_type_t type = FRAME_TYPE_AUTO;
+	char* in = (char*)encodeNV12Buffer;
+	int in_size = encodeBitstreamBufferLength;
+	char* out = encodeBitstreamBuffer;
+	int outCnt = vl_video_encoder_encode(handle, type, in, in_size, &out);
+	//printf("vl_video_encoder_encode = %d\n", outCnt);
+
+	encodeMutex.Unlock();
+
+	if (outCnt > 0)
+	{
+		ssize_t writeCount = write(encoderFileDescriptor, encodeBitstreamBuffer, outCnt);
+		if (writeCount < 0)
+		{
+			throw Exception("write failed.");
+		}
+	}
+
+	
 }
 
-float GetTime()
-{
-	gettimeofday(&endTime, NULL);
-	float seconds = (endTime.tv_sec - startTime.tv_sec);
-	float milliseconds = (float(endTime.tv_usec - startTime.tv_usec)) / 1000000.0f;
 
-	startTime = endTime;
-
-	return seconds + milliseconds;
-}
-
-float ConvertTimeval(timeval* value)
-{
-	if (value == nullptr)
-		throw Exception("value is null.");
-
-	float seconds = value->tv_sec;
-	float milliseconds = ((float)value->tv_usec) / 1000000.0f;
-
-	return seconds + milliseconds;
-}
-
+Stopwatch sw;
+Timer timer;
 
 int main(int argc, char** argv)
 {
@@ -427,6 +470,8 @@ int main(int argc, char** argv)
 		}
 	}
 
+	encoderFileDescriptor = fdOut;
+
 
 #if 1
 	// Initialize the encoder
@@ -442,7 +487,7 @@ int main(int argc, char** argv)
 		width, height, fps, bitrate, gop);
 
 	vl_img_format_t img_format = IMG_FMT_NV12;
-	vl_codec_handle_t handle = vl_video_encoder_init(codec_id, width, height, fps, bitrate, gop, img_format);
+	handle = vl_video_encoder_init(codec_id, width, height, fps, bitrate, gop, img_format);
 	fprintf(stderr, "handle = %ld\n", handle);
 #endif
 
@@ -459,10 +504,12 @@ int main(int argc, char** argv)
 
 	int nv12Size = format.fmt.pix.width * format.fmt.pix.height * 4;
 	unsigned char* nv12 = new unsigned char[nv12Size];
+	encodeNV12Buffer = nv12;
 	fprintf(stderr, "nv12Size = %d\n", nv12Size);
 
 	int ENCODE_BUFFER_SIZE = nv12Size; //1024 * 32;
 	char* encodeBuffer = new char[ENCODE_BUFFER_SIZE];
+	encodeBitstreamBuffer = encodeBuffer;
 	//fprintf(stderr, "ENCODEC_BUFFER_SIZE = %d\n", ENCODEC_BUFFER_SIZE);
 
 
@@ -481,7 +528,11 @@ int main(int argc, char** argv)
 	int frames = 0;
 	float totalTime = 0;
 	float lastTimestamp = 0;
-	ResetTime();
+	sw.Start(); //ResetTime();
+	
+	timer.Callback = EncodeFrame;
+	timer.SetInterval(1.0 / fps);
+	//timer.Start();
 
 	while (true)
 	{
@@ -497,10 +548,10 @@ int main(int argc, char** argv)
 		}
 
 
-		float timestamp = ConvertTimeval(&buffer.timestamp);
-		float elapsedTime = timestamp - lastTimestamp;
+		//float timestamp = ConvertTimeval(&buffer.timestamp);
+		//float elapsedTime = timestamp - lastTimestamp;
 
-		printf("Got a buffer: index=%d, timestamp=%f, elapsed=%f\n", buffer.index, timestamp, elapsedTime);
+		//printf("Got a buffer: index=%d, timestamp=%f, elapsed=%f\n", buffer.index, timestamp, elapsedTime);
 
 		/*
 		__u32	type	Frame rate the timecodes are based on, see Table 3-6.
@@ -514,7 +565,7 @@ int main(int argc, char** argv)
 		//printf("\ttype=%d, flags=%d, frames=%d, seconds=%d, minutes=%d, hours=%d\n",
 		//	buffer.timecode.type, buffer.timecode.flags, buffer.timecode.frames, buffer.timecode.seconds, buffer.timecode.minutes, buffer.timecode.hours);
 
-		lastTimestamp = timestamp;
+		//lastTimestamp = timestamp;
 
 #if 0
 		// Process frame
@@ -569,7 +620,7 @@ int main(int argc, char** argv)
 		
 		// MJPEG
 		unsigned char* data = (unsigned char*)bufferMappings[buffer.index].Start;
-		size_t dataLength = buffer.bytesused; //bufferMappings[buffer.index].Length;
+		size_t dataLength = buffer.bytesused;
 		
 		//printf("dataLength=%lu\n", dataLength);
 
@@ -594,12 +645,8 @@ int main(int argc, char** argv)
 
 			fprintf(stderr, "needsMjpegDht = %d\n", needsMJpegDht);
 
-			// jpeg-turbo
-			//int jpegWidth;
-			//int jpegHeight;
-			//int jpegSubsamp;
-			//int jpegColorspace;
 
+			// jpeg-turbo
 			int api = tjDecompressHeader3(jpegDecompressor,
 				data,
 				dataLength,
@@ -629,7 +676,11 @@ int main(int argc, char** argv)
 			
 			fprintf(stderr, "jpegYuv=%p jpegYuvSize=%lu\n",
 				jpegYuv, jpegYuvSize);
+
+
+			timer.Start();
 		}
+
 
 #if 0
 		ssize_t writeCount = write(fdOut, data, buffer.bytesused);
@@ -688,6 +739,8 @@ int main(int argc, char** argv)
 		}
 		else
 		{
+			encodeMutex.Lock();
+
 			// convert YUV422 to NV12
 			int srcStride = format.fmt.pix.width;
 			unsigned char* srcY = jpegYuv;
@@ -722,7 +775,9 @@ int main(int argc, char** argv)
 				}
 			}
 
-#if 1
+			encodeMutex.Unlock();
+
+#if 0
 			// Encode the video frames
 			vl_frame_type_t type = FRAME_TYPE_AUTO;
 			char* in = (char*)&nv12[0];
@@ -753,7 +808,9 @@ int main(int argc, char** argv)
 
 		// Measure FPS
 		++frames;
-		totalTime += GetTime();
+		totalTime += (float)sw.Elapsed(); //GetTime();
+		
+		sw.Reset();
 
 		if (totalTime >= 1.0f)
 		{
