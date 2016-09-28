@@ -2,6 +2,8 @@
 // ffmpeg -framerate 60 -i test.h264 -vcodec copy test.mp4
 // sudo apt install libjpeg-turbo8-dev
 
+// echo 1 | sudo tee /sys/class/graphics/fb0/blank
+
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -195,6 +197,11 @@ unsigned char* encodeNV12Buffer = nullptr;
 char* encodeBitstreamBuffer = nullptr;
 size_t encodeBitstreamBufferLength = 0;
 Mutex encodeMutex;
+unsigned char* mjpegData = nullptr;
+size_t mjpegDataLength = 0;
+bool needsMJpegDht = true;
+double timeStamp = 0;
+double frameRate = 0;
 
 void EncodeFrame()
 {
@@ -219,8 +226,83 @@ void EncodeFrame()
 		}
 	}
 
-	
+
+	//unsigned int pts = timeStamp * 96000;
+	//codec_set_pcrscr(&codecContext, (int)pts);
+
+
+	timeStamp += frameRate;
+	//fprintf(stderr, "timeStamp=%f\n", timeStamp);
 }
+
+void EncodeFrameHardware()
+{
+	encodeMutex.Lock();
+
+	// Encode the video frames
+	vl_frame_type_t type = FRAME_TYPE_AUTO;
+	char* in = (char*)encodeNV12Buffer;
+	int in_size = encodeBitstreamBufferLength;
+	char* out = encodeBitstreamBuffer;
+	int outCnt = vl_video_encoder_encode(handle, type, in, in_size, &out);
+	//printf("vl_video_encoder_encode = %d\n", outCnt);
+
+
+	// Hardware
+	unsigned int pts = timeStamp * 96000;
+	//if (codec_checkin_pts(&codecContext, pts))
+	//{
+	//	printf("codec_checkin_pts failed\n");
+	//}
+
+	if (needsMJpegDht)
+	{
+		// Find the start of scan (SOS)
+		unsigned char* sos = mjpegData;
+		while (sos < mjpegData + mjpegDataLength - 1)
+		{
+			if (sos[0] == 0xff && sos[1] == 0xda)
+				break;
+
+			++sos;
+		}
+
+		// Send everthing up to SOS
+		int headerLength = sos - mjpegData;
+		WriteCodecData(mjpegData, headerLength);
+
+		// Send DHT
+		WriteCodecData(MJpegDht, MJpegDhtLength);
+
+		// Send remaining data
+		WriteCodecData(sos, mjpegDataLength - headerLength);
+
+		//printf("dataLength=%lu, found SOS @ %d\n", dataLength, headerLength);
+	}
+	else
+	{
+		WriteCodecData(mjpegData, (int)mjpegDataLength);
+	}
+
+	encodeMutex.Unlock();
+
+	if (outCnt > 0)
+	{
+		ssize_t writeCount = write(encoderFileDescriptor, encodeBitstreamBuffer, outCnt);
+		if (writeCount < 0)
+		{
+			throw Exception("write failed.");
+		}
+	}
+
+
+	codec_set_pcrscr(&codecContext, (int)pts);
+
+
+	timeStamp += frameRate;
+	fprintf(stderr, "timeStamp=%f\n", timeStamp);
+}
+
 
 
 Stopwatch sw;
@@ -524,13 +606,13 @@ int main(int argc, char** argv)
 
 
 	bool isFirstFrame = true;
-	bool needsMJpegDht = true;
+	/*bool needsMJpegDht = true;*/
 	int frames = 0;
 	float totalTime = 0;
 	float lastTimestamp = 0;
 	sw.Start(); //ResetTime();
 	
-	timer.Callback = EncodeFrame;
+	timer.Callback = EncodeFrame; //EncodeFrameHardware
 	timer.SetInterval(1.0 / fps);
 	//timer.Start();
 
@@ -622,6 +704,9 @@ int main(int argc, char** argv)
 		unsigned char* data = (unsigned char*)bufferMappings[buffer.index].Start;
 		size_t dataLength = buffer.bytesused;
 		
+		mjpegData = data;
+		mjpegDataLength = dataLength;
+
 		//printf("dataLength=%lu\n", dataLength);
 
 		if (isFirstFrame)
@@ -678,6 +763,7 @@ int main(int argc, char** argv)
 				jpegYuv, jpegYuvSize);
 
 
+			frameRate = timer.Interval();
 			timer.Start();
 		}
 
