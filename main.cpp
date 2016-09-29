@@ -1,7 +1,24 @@
+/*
+*
+* Copyright (C) 2016 OtherCrashOverride@users.noreply.github.com.
+* All rights reserved.
+*
+* This program is free software; you can redistribute it and/or modify
+* it under the terms of the GNU General Public License version 2, as
+* published by the Free Software Foundation.
+*
+* This program is distributed in the hope that it will be useful, but WITHOUT
+* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+* FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+* more details.
+*
+*/
+
+
+// Developer notes:
 // g++ -g main.cpp -o c2cap -l vpcodec
 // ffmpeg -framerate 60 -i test.h264 -vcodec copy test.mp4
 // sudo apt install libjpeg-turbo8-dev
-
 // echo 1 | sudo tee /sys/class/graphics/fb0/blank
 
 #include <sys/stat.h>
