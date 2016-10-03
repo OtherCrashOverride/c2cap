@@ -159,7 +159,7 @@ void OpenCodec(int width, int height, int fps)
 	codecContext.am_sysinfo.width = width;
 	codecContext.am_sysinfo.height = height;
 	codecContext.am_sysinfo.rate = (96000.0 / fps);	
-	codecContext.am_sysinfo.param = (void*)( SYNC_OUTSIDE); //EXTERNAL_PTS |
+	codecContext.am_sysinfo.param = (void*)(EXTERNAL_PTS | SYNC_OUTSIDE); //EXTERNAL_PTS |
 
 
 	int api = codec_init(&codecContext);
@@ -412,6 +412,205 @@ enum class PictureFormat
 	Yuyv = V4L2_PIX_FMT_YUYV,
 	MJpeg = V4L2_PIX_FMT_MJPEG
 };
+
+
+
+void WriteToFile(const char* path, const char* value)
+{
+	int fd = open(path, O_RDWR | O_TRUNC, 0644);
+	if (fd < 0)
+	{
+		printf("WriteToFile open failed: %s = %s\n", path, value);
+		exit(1);
+	}
+
+	if (write(fd, value, strlen(value)) < 0)
+	{
+		printf("WriteToFile write failed: %s = %s\n", path, value);
+		exit(1);
+	}
+
+	close(fd);
+}
+
+void SetVfmState()
+{
+	WriteToFile("/sys/class/vfm/map", "rm default");
+	WriteToFile("/sys/class/vfm/map", "add default decoder ionvideo");
+}
+
+void ResetVfmState()
+{
+	WriteToFile("/sys/class/vfm/map", "rm default");
+	WriteToFile("/sys/class/vfm/map", "add default decoder ppmgr deinterlace amvideo");
+}
+
+struct IonInfo
+{
+	int IonFD;
+	int IonVideoFD;
+	size_t BufferSize;
+	unsigned long PhysicalAddress;
+	int VideoBufferDmaBufferFD[BUFFER_COUNT];
+};
+
+IonInfo OpenIonVideoCapture(int width, int height)
+{
+	const int VIDEO_WIDTH = width;
+	const int VIDEO_HEIGHT = height;
+	const unsigned int VIDEO_FORMAT = V4L2_PIX_FMT_NV12;
+	const int VIDEO_FRAME_SIZE = VIDEO_WIDTH * VIDEO_HEIGHT;
+	//const int BUFFER_COUNT = 2;
+
+
+	IonInfo info = { 0 };
+
+	info.IonVideoFD = open("/dev/video13", O_RDWR | O_NONBLOCK); //| O_NONBLOCK
+	if (info.IonVideoFD < 0)
+	{
+		throw Exception("open ionvideo failed.");
+	}
+
+	//printf("ionvideo file handle: %x\n", info.IonVideoFD);
+
+
+	info.IonFD = open("/dev/ion", O_RDWR);
+	if (info.IonFD < 0)
+	{
+		throw Exception("open ion failed.");
+	}
+
+	//printf("ion file handle: %x\n", info.IonFD);
+
+
+	// Set the capture format
+	v4l2_format format = { 0 };
+	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	format.fmt.pix_mp.width = VIDEO_WIDTH;
+	format.fmt.pix_mp.height = VIDEO_HEIGHT;
+	format.fmt.pix_mp.pixelformat = VIDEO_FORMAT;
+
+	int v4lcall = ioctl(info.IonVideoFD, VIDIOC_S_FMT, &format);
+	if (v4lcall < 0)
+	{
+		throw Exception("ionvideo VIDIOC_S_FMT failed.");
+	}
+
+
+	// Request buffers
+	v4l2_requestbuffers requestBuffers = { 0 };
+	requestBuffers.count = BUFFER_COUNT;
+	requestBuffers.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	requestBuffers.memory = V4L2_MEMORY_DMABUF;
+
+	v4lcall = ioctl(info.IonVideoFD, VIDIOC_REQBUFS, &requestBuffers);
+	if (v4lcall < 0)
+	{
+		throw Exception("ionvideo VIDIOC_REQBUFS failed.");
+	}
+
+
+	// Allocate buffers
+	int videoFrameLength = 0;
+	switch (format.fmt.pix_mp.pixelformat)
+	{
+		case V4L2_PIX_FMT_RGB32:
+			videoFrameLength = VIDEO_FRAME_SIZE * 4;
+			break;
+
+		case V4L2_PIX_FMT_NV12:
+			videoFrameLength = VIDEO_FRAME_SIZE * 2;
+			break;
+
+		default:
+			throw Exception("Unsupported video formated.");
+	}
+	
+	info.BufferSize = videoFrameLength;
+
+
+	for (int i = 0; i < BUFFER_COUNT; ++i)
+	{
+		// Allocate a buffer
+		ion_allocation_data allocation_data = { 0 };
+		allocation_data.len = videoFrameLength;
+		allocation_data.heap_id_mask = ION_HEAP_CARVEOUT_MASK;
+		allocation_data.flags = ION_FLAG_CACHED;
+
+		int ionCall = ioctl(info.IonFD, ION_IOC_ALLOC, &allocation_data);
+		if (ionCall != 0)
+		{
+			throw Exception("failed to allocate ion buffer.");
+		}
+
+
+		// Export the dma_buf
+		ion_fd_data fd_data = { 0 };
+		fd_data.handle = allocation_data.handle;
+
+		ionCall = ioctl(info.IonFD, ION_IOC_SHARE, &fd_data);
+		if (ionCall < 0)
+		{
+			throw Exception("failed to retrieve ion dma_buf handle");
+		}
+
+		info.VideoBufferDmaBufferFD[i] = fd_data.fd;
+
+
+		// Physical Address
+		// Get the physical address for the buffer
+		meson_phys_data physData = { 0 };
+		physData.handle = fd_data.fd;
+
+		ion_custom_data ionCustomData = { 0 };
+		ionCustomData.cmd = ION_IOC_MESON_PHYS_ADDR;
+		ionCustomData.arg = (long unsigned int)&physData;
+
+		ionCall = ioctl(info.IonFD, ION_IOC_CUSTOM, &ionCustomData);
+		if (ionCall != 0)
+		{
+			throw Exception("ION_IOC_CUSTOM failed.");
+			//printf("ION_IOC_CUSTOM failed (%d).", io);
+		}
+
+		info.PhysicalAddress = physData.phys_addr;
+
+
+		// Queue the buffer for V4L to use
+		v4l2_buffer buffer = { 0 };
+
+		buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buffer.memory = V4L2_MEMORY_DMABUF;
+		buffer.index = i;
+		buffer.m.fd = info.VideoBufferDmaBufferFD[i];
+		buffer.length = 1;	// Ionvideo only supports single plane
+
+		v4lcall = ioctl(info.IonVideoFD, VIDIOC_QBUF, &buffer);
+		if (v4lcall < 0)
+		{
+			throw Exception("failed to queue ion buffer.");
+		}
+
+		// DEBUG
+		//printf("Queued v4l2_buffer:\n");
+		//printf("\tindex=%x\n", buffer.index);
+		//printf("\ttype=%x\n", buffer.type);
+		//printf("\tm.fd=%x\n", buffer.m.fd);
+	}
+
+
+	// Start "streaming"
+	int bufferType = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	v4lcall = ioctl(info.IonVideoFD, VIDIOC_STREAMON, &bufferType);
+	if (v4lcall < 0)
+	{
+		throw Exception("ionvideo VIDIOC_STREAMON failed.");
+	}
+
+
+	return info;
+}
 
 
 
@@ -670,8 +869,6 @@ int main(int argc, char** argv)
 	}
 
 
-	// Create MJPEG codec
-	//OpenCodec(width, height, fps);
 
 
 	// Create an output file	
@@ -741,6 +938,15 @@ int main(int argc, char** argv)
 	}
 
 
+
+	// Ionvideo
+	SetVfmState();
+
+	IonInfo ionInfo = OpenIonVideoCapture(width, height);
+
+
+	// Create MJPEG codec
+	OpenCodec(width, height, 60 /*fps*/);
 
 
 #if 1
@@ -1100,6 +1306,7 @@ int main(int argc, char** argv)
 #endif
 
 
+#if 0
 			// jpeg-turbo
 			int api = tjDecompressToYUV2(jpegDecompressor,
 				data,
@@ -1115,7 +1322,73 @@ int main(int argc, char** argv)
 				fprintf(stderr, "tjDecompressToYUV2 failed (%s)\n", message);
 			}
 			else
+#else
+			if (needsMJpegDht)
 			{
+				// Find the start of scan (SOS)
+				unsigned char* sos = data;
+				while (sos < data + dataLength - 1)
+				{
+					if (sos[0] == 0xff && sos[1] == 0xda)
+						break;
+
+					++sos;
+				}
+
+				// Send everthing up to SOS
+				int headerLength = sos - data;
+				WriteCodecData(data, headerLength);
+
+				// Send DHT
+				WriteCodecData(MJpegDht, MJpegDhtLength);
+
+				// Send remaining data
+				WriteCodecData(sos, dataLength - headerLength);
+
+				//printf("dataLength=%lu, found SOS @ %d\n", dataLength, headerLength);
+			}
+			else
+			{
+				WriteCodecData(data, dataLength);
+			}
+
+
+			// Get an ionvideo frame
+			//printf("Getting ionvideo frame.\n");
+
+			v4l2_buffer ionBuffer = { 0 };
+			ionBuffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			ionBuffer.memory = V4L2_MEMORY_DMABUF;
+
+			while (true)
+			{
+				io = ioctl(ionInfo.IonVideoFD, VIDIOC_DQBUF, &ionBuffer);
+				if (io < 0)
+				{
+					//printf("io=%d\n", io);
+					//throw Exception("failed to dequeue ionvideo buffer.");
+					break;
+				}
+
+				printf("Ionvideo frame OK.\n");
+
+
+				yuvSourcePtr = mmap(NULL,
+					ionInfo.BufferSize,
+					PROT_READ | PROT_WRITE,
+					MAP_FILE | MAP_SHARED,
+					ionInfo.VideoBufferDmaBufferFD[ionBuffer.index],
+					0);
+				if (!yuvSourcePtr)
+				{
+					throw Exception("YuvSource mmap failed.");
+				}
+
+				YuvSource.ExportHandle = ionInfo.VideoBufferDmaBufferFD[ionBuffer.index];
+				YuvSource.PhysicalAddress = ionInfo.PhysicalAddress;
+
+#endif
+			//{
 				encodeMutex.Lock();
 
 #if 0
@@ -1177,18 +1450,18 @@ int main(int argc, char** argv)
 				config.src_dst_type = ALLOC_ALLOC; //ALLOC_OSD0;
 				config.alu_const_color = 0xffffffff;
 				//GE2D_FORMAT_S16_YUV422T, GE2D_FORMAT_S16_YUV422B kernel panics
-				config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_YUV422; //GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S8_Y;
-				config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
+				config.src_format = GE2D_FORMAT_M24_NV12; //GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_YUV422; //GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S8_Y;
+				config.dst_format = GE2D_FORMAT_M24_NV21; //GE2D_LITTLE_ENDIAN | //GE2D_FORMAT_S32_ARGB;
 
 				config.src_planes[0].addr = YuvSource.PhysicalAddress;
 				config.src_planes[0].w = width;
 				config.src_planes[0].h = height;
 				config.src_planes[1].addr = config.src_planes[0].addr + (width * height);
-				config.src_planes[1].w = width / 2;
+				config.src_planes[1].w = width; // / 2;
 				config.src_planes[1].h = height;
-				config.src_planes[2].addr = config.src_planes[1].addr + ((width / 2) * height);
-				config.src_planes[2].w = width / 2;
-				config.src_planes[2].h = height;
+				//config.src_planes[2].addr = config.src_planes[1].addr + ((width / 2) * height);
+				//config.src_planes[2].w = width / 2;
+				//config.src_planes[2].h = height;
 
 				config.dst_planes[0].addr = YuvDestination.PhysicalAddress;
 				config.dst_planes[0].w = width;
@@ -1217,7 +1490,7 @@ int main(int argc, char** argv)
 				blitRect.dst_rect.w = width;
 				blitRect.dst_rect.h = height;
 
-				io = ioctl(ge2d_fd, GE2D_BLIT_NOALPHA, &blitRect);
+				io = ioctl(ge2d_fd, GE2D_STRETCHBLIT_NOALPHA, &blitRect);
 				if (io < 0)
 				{
 					throw Exception("GE2D_BLIT_NOALPHA failed.");
@@ -1241,12 +1514,29 @@ int main(int argc, char** argv)
 #endif
 
 				encodeMutex.Unlock();
+
+
+#if 1
+				munmap(yuvSourcePtr, ionInfo.BufferSize);
+
+
+				// Return the buffer to V4L
+				io = ioctl(ionInfo.IonVideoFD, VIDIOC_QBUF, &ionBuffer);
+				if (io < 0)
+				{
+					throw Exception("failed to queue ionvideo buffer.");
+				}
+
+#endif
 			}
 		}
 		else
 		{
 			throw Exception("Unsupported PictureFromat.");
 		}
+
+
+
 
 
 		//Preview
