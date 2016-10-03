@@ -126,6 +126,7 @@ struct option longopts[] = {
 	{ "height",			required_argument,	NULL,	'h' },
 	{ "fps",			required_argument,	NULL,	'f' },
 	{ "bitrate",		required_argument,	NULL,	'b' },
+	{ "pixformat",		required_argument,	NULL,	'p' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -404,6 +405,16 @@ IonBuffer IonAllocate(int ion_fd, size_t bufferSize)
 	return result;
 }
 
+
+enum class PictureFormat
+{
+	Unknown = 0,
+	Yuyv = V4L2_PIX_FMT_YUYV,
+	MJpeg = V4L2_PIX_FMT_MJPEG
+};
+
+
+
 Stopwatch sw;
 Timer timer;
 
@@ -424,9 +435,10 @@ int main(int argc, char** argv)
 	int height = DEFAULT_HEIGHT;
 	int fps = DEFAULT_FRAME_RATE;
 	int bitrate = DEFAULT_BITRATE;
+	PictureFormat pixformat = PictureFormat::Yuyv;
 
 	int c;
-	while ((c = getopt_long(argc, argv, "d:o:w:h:f:b:", longopts, NULL)) != -1)
+	while ((c = getopt_long(argc, argv, "d:o:w:h:f:b:p:", longopts, NULL)) != -1)
 	{
 		switch (c)
 		{
@@ -452,6 +464,21 @@ int main(int argc, char** argv)
 
 			case 'b':
 				bitrate = atoi(optarg);
+				break;
+
+			case 'p':
+				if (strcmp(optarg, "yuyv") == 0)
+				{
+					pixformat = PictureFormat::Yuyv;
+				}
+				else if (strcmp(optarg, "mjpeg") == 0)
+				{
+					pixformat = PictureFormat::MJpeg;
+				}
+				else
+				{
+					throw Exception("Unknown pixformat.");
+				}
 				break;
 
 			default:
@@ -546,14 +573,14 @@ int main(int argc, char** argv)
 	}
 
 	
-	// TODO: format selection from user input / enumeration
-
+	// Apply capture settings
 	v4l2_format format = { 0 };
 	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	format.fmt.pix.width = width;
 	format.fmt.pix.height = height;
 	//format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
-	format.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+	//format.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+	format.fmt.pix.pixelformat = (__u32)pixformat;
 	format.fmt.pix.field = V4L2_FIELD_ANY; //V4L2_FIELD_INTERLACED; //V4L2_FIELD_ANY; V4L2_FIELD_ALTERNATE
 
 	io = ioctl(captureDev, VIDIOC_S_FMT, &format);
@@ -564,6 +591,11 @@ int main(int argc, char** argv)
 
 	fprintf(stderr, "v4l2_format: width=%d, height=%d, pixelformat=0x%x\n",
 		format.fmt.pix.width, format.fmt.pix.height, format.fmt.pix.pixelformat);
+
+	// Readback device selected settings
+	width = format.fmt.pix.width;
+	height = format.fmt.pix.height;
+	pixformat = (PictureFormat)format.fmt.pix.pixelformat;
 
 
 	v4l2_streamparm streamParm = { 0 };
@@ -580,6 +612,10 @@ int main(int argc, char** argv)
 	fprintf(stderr, "capture.timeperframe: numerator=%d, denominator=%d\n",
 		streamParm.parm.capture.timeperframe.numerator,
 		streamParm.parm.capture.timeperframe.denominator);
+
+	// Note: Video is encoded at the requested framerate whether
+	// the device produces it or not.  Therefore, there is no
+	// need to read back teh fps.
 
 
 	// Request buffers
@@ -635,7 +671,7 @@ int main(int argc, char** argv)
 
 
 	// Create MJPEG codec
-	OpenCodec(width, height, fps);
+	//OpenCodec(width, height, fps);
 
 
 	// Create an output file	
@@ -801,192 +837,25 @@ int main(int argc, char** argv)
 
 		//lastTimestamp = timestamp;
 
-#if 0
-		// Process frame
-		//printf("Got a buffer: index = %d\n", buffer.index);
-		unsigned short* data = (unsigned short*)bufferMappings[buffer.index].Start;
-
-		// convert YUYV to NV12
-		int srcStride = format.fmt.pix.width; // *sizeof(short);
-		int dstStride = format.fmt.pix.width;
-		int dstVUOffset = format.fmt.pix.width * format.fmt.pix.height;
-
-		for (int y = 0; y < format.fmt.pix.height; ++y)
+		if (pixformat == PictureFormat::Yuyv)
 		{
-			for (int x = 0; x < format.fmt.pix.width; x += 2)
+			if (isFirstFrame)
 			{
-				int srcIndex = y * srcStride + x;
-				//unsigned char l = data[srcIndex];
-				unsigned short yu = data[srcIndex];
-				unsigned short yv = data[srcIndex + 1];
+				frameRate = timer.Interval();
+				timer.Start();
 
-
-				int dstIndex = y * dstStride + (x);
-				nv12[dstIndex] = yu & 0xff;
-				nv12[dstIndex + 1] = yv & 0xff;
-
-				if (y % 2 == 0)
-				{
-					int dstVUIndex = (y >> 1) * dstStride + (x);
-					nv12[dstVUOffset + dstVUIndex] = yv >> 8;
-					nv12[dstVUOffset + dstVUIndex + 1] = yu >> 8;
-				}
-			}
-		}
-
-		// Encode the video frames
-		vl_frame_type_t type = FRAME_TYPE_AUTO;
-		char* in = (char*)&nv12[0];
-		int in_size = ENCODE_BUFFER_SIZE;
-		char* out = encodeBuffer;
-		int outCnt = vl_video_encoder_encode(handle, type, in, in_size, &out);
-		//printf("vl_video_encoder_encode = %d\n", outCnt);
-
-		if (outCnt > 0)
-		{
-			ssize_t writeCount = write(fdOut, encodeBuffer, outCnt);
-			if (writeCount < 0)
-			{
-				throw Exception("write failed.");
-			}
-		}
-#endif
-		
-		// MJPEG
-		unsigned char* data = (unsigned char*)bufferMappings[buffer.index].Start;
-		size_t dataLength = buffer.bytesused;
-		
-		mjpegData = data;
-		mjpegDataLength = dataLength;
-
-		//printf("dataLength=%lu\n", dataLength);
-
-		if (isFirstFrame)
-		{
-			unsigned char* scan = data;
-			while (scan < data + dataLength - 4)
-			{
-				if (scan[0] == MJpegDht[0] &&
-					scan[1] == MJpegDht[1] &&
-					scan[2] == MJpegDht[2] &&
-					scan[3] == MJpegDht[3])
-				{
-					needsMJpegDht = false;
-					break;
-				}
-
-				++scan;
+				isFirstFrame = false;
 			}
 
-			isFirstFrame = false;
 
-			fprintf(stderr, "needsMjpegDht = %d\n", needsMJpegDht);
-
-
-			// jpeg-turbo
-			int api = tjDecompressHeader3(jpegDecompressor,
-				data,
-				dataLength,
-				&jpegWidth,
-				&jpegHeight,
-				&jpegSubsamp,
-				&jpegColorspace);
-			if (api != 0)
-			{
-				char* message = tjGetErrorStr();
-				fprintf(stderr, "tjDecompressHeader3 failed (%s)\n", message);
-			}
-			else
-			{
-				fprintf(stderr, "jpegWidth=%d jpegHeight=%d jpegSubsamp=%d jpegColorspace=%d\n",
-					jpegWidth, jpegHeight, jpegSubsamp, jpegColorspace);
-			}
-
-			// TODO: fail if not YUV422
-
-			unsigned long jpegYuvSize = tjBufSizeYUV2(jpegWidth,
-				1,
-				jpegHeight,
-				jpegSubsamp);
-
-			//jpegYuv = new unsigned char[jpegYuvSize];
-			jpegYuv = (unsigned char*)yuvSourcePtr;
-
-			fprintf(stderr, "jpegYuv=%p jpegYuvSize=%lu\n",
-				jpegYuv, jpegYuvSize);
-
-
-			frameRate = timer.Interval();
-			timer.Start();
-		}
-
+			// Process frame
 
 #if 0
-		ssize_t writeCount = write(fdOut, data, buffer.bytesused);
-		if (writeCount < 0)
-		{
-			throw Exception("write failed.");
-		}
-#endif
+			//printf("Got a buffer: index = %d\n", buffer.index);
+			unsigned short* data = (unsigned short*)bufferMappings[buffer.index].Start;
 
-
-#if 0
-		if (needsMJpegDht)
-		{
-			// Find the start of scan (SOS)
-			unsigned char* sos = data;
-			while (sos < data + dataLength - 1)
-			{
-				if (sos[0] == 0xff && sos[1] == 0xda)
-					break;
-
-				++sos;
-			}
-
-			// Send everthing up to SOS
-			int headerLength = sos - data;
-			WriteCodecData(data, headerLength);
-
-			// Send DHT
-			WriteCodecData(MJpegDht, MJpegDhtLength);
-
-			// Send remaining data
-			WriteCodecData(sos, dataLength - headerLength);
-
-			//printf("dataLength=%lu, found SOS @ %d\n", dataLength, headerLength);
-		}
-		else
-		{
-			WriteCodecData(data, dataLength);
-		}
-#endif
-
-
-		// jpeg-turbo
-		int api = tjDecompressToYUV2(jpegDecompressor,
-			data,
-			dataLength,
-			jpegYuv,
-			jpegWidth,
-			1,
-			jpegHeight,
-			TJFLAG_FASTDCT);	//TJFLAG_ACCURATEDCT
-		if (api != 0)
-		{
-			char* message = tjGetErrorStr();
-			fprintf(stderr, "tjDecompressToYUV2 failed (%s)\n", message);
-		}
-		else
-		{
-			encodeMutex.Lock();
-
-#if 0
-			// convert YUV422 to NV12
-			int srcStride = format.fmt.pix.width;
-			unsigned char* srcY = jpegYuv;
-			unsigned char* srcU = srcY + (format.fmt.pix.width * format.fmt.pix.height);
-			unsigned char* srcV = srcU + ((format.fmt.pix.width / 2) * format.fmt.pix.height);
-
+			// convert YUYV to NV12
+			int srcStride = format.fmt.pix.width; // *sizeof(short);
 			int dstStride = format.fmt.pix.width;
 			int dstVUOffset = format.fmt.pix.width * format.fmt.pix.height;
 
@@ -995,11 +864,9 @@ int main(int argc, char** argv)
 				for (int x = 0; x < format.fmt.pix.width; x += 2)
 				{
 					int srcIndex = y * srcStride + x;
-					int chromaIndex = y * (srcStride >> 1) + (x >> 1);
-
 					//unsigned char l = data[srcIndex];
-					unsigned short yu = srcY[srcIndex] | (srcU[chromaIndex] << 8);
-					unsigned short yv = srcY[srcIndex + 1] | (srcV[chromaIndex] << 8);
+					unsigned short yu = data[srcIndex];
+					unsigned short yv = data[srcIndex + 1];
 
 
 					int dstIndex = y * dstStride + (x);
@@ -1014,68 +881,35 @@ int main(int argc, char** argv)
 					}
 				}
 			}
-
 #else
 			// Blit
 
-			
-			// Configure GE2D
-			/*
-			config_para_ex_s configex = { 0 };
+			encodeMutex.Lock();
 
-			configex.src_para.mem_type = CANVAS_ALLOC;
-			configex.src_para.format = GE2D_FMT_M24_YUV420T; //GE2D_FORMAT_S16_YUV422; //GE2D_FORMAT_M24_YUV422;
-			configex.src_para.left = 0;
-			configex.src_para.top = 0;
-			configex.src_para.width = width;
-			configex.src_para.height = height;
-			configex.src_planes[0].addr = YuvSource.PhysicalAddress;
-			configex.src_planes[0].w = width;
-			configex.src_planes[0].h = height;
-			configex.src_planes[1].addr = configex.src_planes[0].addr + (format.fmt.pix.width * format.fmt.pix.height);
-			configex.src_planes[1].w = width; // / 2;
-			configex.src_planes[1].h = height;
-			configex.src_planes[2].addr = configex.src_planes[1].addr + ((format.fmt.pix.width / 2) * format.fmt.pix.height);;
-			configex.src_planes[2].w = width; // / 2;
-			configex.src_planes[2].h = height;
 
-			configex.src2_para.mem_type = CANVAS_TYPE_INVALID;
+			unsigned char* data = (unsigned char*)bufferMappings[buffer.index].Start;
+			size_t dataLength = buffer.bytesused;
 
-			configex.dst_para.mem_type = CANVAS_OSD0; //CANVAS_ALLOC;
-			configex.dst_para.format = GE2D_FORMAT_S32_ARGB; //GE2D_FORMAT_S32_RGBA; //; //GE2D_FORMAT_M24_NV12; //GE2D_FORMAT_M24_NV21;
-			configex.dst_para.left = 0;
-			configex.dst_para.top = 0;
-			configex.dst_para.width = width;
-			configex.dst_para.height = height;
-			configex.dst_planes[0].addr = YuvDestination.PhysicalAddress;
-			configex.dst_planes[0].w = width;
-			configex.dst_planes[0].h = height;
-			configex.dst_planes[1].addr = configex.dst_planes[0].addr + (format.fmt.pix.width * format.fmt.pix.height);
-			configex.dst_planes[1].w = width / 2;
-			configex.dst_planes[1].h = height / 2;
-			configex.dst_planes[2].addr = configex.dst_planes[1].addr + ((format.fmt.pix.width / 2) * (format.fmt.pix.height / 2));
-			configex.dst_planes[2].w = width / 2;
-			configex.dst_planes[2].h = height / 2;
+#if 0
+			memcpy((void*)yuvSourcePtr, data, dataLength);
+#else
+			unsigned char* dest = (unsigned char*)yuvSourcePtr;
 
-			io = ioctl(ge2d_fd, GE2D_CONFIG_EX, &configex);
-			if (io < 0)
+			for (size_t i = 0; i < dataLength; i += 4)
 			{
-				throw Exception("GE2D_CONFIG_EX failed");
+				dest[i] = data[i + 1];
+				dest[i + 1] = data[i + 0];
+				dest[i + 2] = data[i + 3];
+				dest[i + 3] = data[i + 2];
 			}
-			*/
+#endif
 
-			//struct config_para_s {
-			//	int  src_dst_type;
-			//	int  alu_const_color;
-			//	unsigned int src_format;
-			//	unsigned int dst_format; /* add for src&dst all in user space. */
+			//jpegYuv = (unsigned char*)yuvSourcePtr;
 
-			//	struct config_planes_s src_planes[4];
-			//	struct config_planes_s dst_planes[4];
-			//	struct src_key_ctrl_s  src_key;
-			//};
 
 			{
+				// Syncronize the source data
+
 				ion_fd_data ionFdData = { 0 };
 				ionFdData.fd = YuvSource.ExportHandle;
 
@@ -1086,42 +920,32 @@ int main(int argc, char** argv)
 				}
 			}
 
+
+			// Configure GE2D
+
 			config_para_s config = { 0 };
-			config.src_dst_type = ALLOC_ALLOC; //ALLOC_OSD0;
+
+			config.src_dst_type =ALLOC_ALLOC; //ALLOC_OSD0;
 			config.alu_const_color = 0xffffffff;
-			//GE2D_FORMAT_S16_YUV422T, GE2D_FORMAT_S16_YUV422B kernel panics
-			config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_YUV422; //GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S8_Y;
-			config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
 			
+			config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FMT_S16_YUV422;
 			config.src_planes[0].addr = YuvSource.PhysicalAddress;
 			config.src_planes[0].w = width;
 			config.src_planes[0].h = height;
-			config.src_planes[1].addr = config.src_planes[0].addr + (width * height);
-			config.src_planes[1].w = width / 2;
-			config.src_planes[1].h = height;
-			config.src_planes[2].addr = config.src_planes[1].addr + ((width / 2) * height);
-			config.src_planes[2].w = width / 2;
-			config.src_planes[2].h = height;
-			//config.src_planes[3].addr = config.src_planes[1].addr + ((format.fmt.pix.width / 2) * format.fmt.pix.height);;
-			//config.src_planes[3].w = width / 2;
-			//config.src_planes[3].h = height;
-			
+
+			config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
 			config.dst_planes[0].addr = YuvDestination.PhysicalAddress;
 			config.dst_planes[0].w = width;
 			config.dst_planes[0].h = height;
 			config.dst_planes[1].addr = config.dst_planes[0].addr + (format.fmt.pix.width * format.fmt.pix.height);
 			config.dst_planes[1].w = width;
 			config.dst_planes[1].h = height / 2;
-			//config.dst_planes[2].addr = config.dst_planes[1].addr + ((format.fmt.pix.width / 2) * (format.fmt.pix.height / 2));
-			//config.dst_planes[2].w = width / 2;
-			//config.dst_planes[2].h = height / 2;
 
 			io = ioctl(ge2d_fd, GE2D_CONFIG, &config);
 			if (io < 0)
 			{
-				throw Exception("GE2D_COGE2D_CONFIGNFIG_EX failed");
+				throw Exception("GE2D_CONFIG failed");
 			}
-
 
 
 			// Perform the blit operation
@@ -1140,13 +964,14 @@ int main(int argc, char** argv)
 			io = ioctl(ge2d_fd, GE2D_BLIT_NOALPHA, &blitRect);
 			if (io < 0)
 			{
-				throw Exception("GE2D_BLIT failed.");
+				throw Exception("GE2D_BLIT_NOALPHA failed.");
 			}
 
 			//printf("GE2D Blit OK.\n");
 
 
 			{
+				// Syncronize the destination data
 				ion_fd_data ionFdData = { 0 };
 				ionFdData.fd = YuvDestination.ExportHandle;
 
@@ -1161,25 +986,312 @@ int main(int argc, char** argv)
 
 			encodeMutex.Unlock();
 
-#if 0
-			// Encode the video frames
-			vl_frame_type_t type = FRAME_TYPE_AUTO;
-			char* in = (char*)&nv12[0];
-			int in_size = ENCODE_BUFFER_SIZE;
-			char* out = encodeBuffer;
-			int outCnt = vl_video_encoder_encode(handle, type, in, in_size, &out);
-			//printf("vl_video_encoder_encode = %d\n", outCnt);
 
-			if (outCnt > 0)
+		}
+		else if (pixformat == PictureFormat::MJpeg)
+		{
+			// MJPEG
+			unsigned char* data = (unsigned char*)bufferMappings[buffer.index].Start;
+			size_t dataLength = buffer.bytesused;
+
+			mjpegData = data;
+			mjpegDataLength = dataLength;
+
+			//printf("dataLength=%lu\n", dataLength);
+
+			if (isFirstFrame)
 			{
-				ssize_t writeCount = write(fdOut, encodeBuffer, outCnt);
-				if (writeCount < 0)
+				unsigned char* scan = data;
+				while (scan < data + dataLength - 4)
 				{
-					throw Exception("write failed.");
+					if (scan[0] == MJpegDht[0] &&
+						scan[1] == MJpegDht[1] &&
+						scan[2] == MJpegDht[2] &&
+						scan[3] == MJpegDht[3])
+					{
+						needsMJpegDht = false;
+						break;
+					}
+
+					++scan;
 				}
+
+				isFirstFrame = false;
+
+				fprintf(stderr, "needsMjpegDht = %d\n", needsMJpegDht);
+
+
+				// jpeg-turbo
+				int api = tjDecompressHeader3(jpegDecompressor,
+					data,
+					dataLength,
+					&jpegWidth,
+					&jpegHeight,
+					&jpegSubsamp,
+					&jpegColorspace);
+				if (api != 0)
+				{
+					char* message = tjGetErrorStr();
+					fprintf(stderr, "tjDecompressHeader3 failed (%s)\n", message);
+				}
+				else
+				{
+					fprintf(stderr, "jpegWidth=%d jpegHeight=%d jpegSubsamp=%d jpegColorspace=%d\n",
+						jpegWidth, jpegHeight, jpegSubsamp, jpegColorspace);
+				}
+
+				// TODO: fail if not YUV422
+
+				unsigned long jpegYuvSize = tjBufSizeYUV2(jpegWidth,
+					1,
+					jpegHeight,
+					jpegSubsamp);
+
+				//jpegYuv = new unsigned char[jpegYuvSize];
+				jpegYuv = (unsigned char*)yuvSourcePtr;
+
+				fprintf(stderr, "jpegYuv=%p jpegYuvSize=%lu\n",
+					jpegYuv, jpegYuvSize);
+
+
+				frameRate = timer.Interval();
+				timer.Start();
+			}
+
+
+#if 0
+			ssize_t writeCount = write(fdOut, data, buffer.bytesused);
+			if (writeCount < 0)
+			{
+				throw Exception("write failed.");
 			}
 #endif
+
+
+#if 0
+			if (needsMJpegDht)
+			{
+				// Find the start of scan (SOS)
+				unsigned char* sos = data;
+				while (sos < data + dataLength - 1)
+				{
+					if (sos[0] == 0xff && sos[1] == 0xda)
+						break;
+
+					++sos;
+				}
+
+				// Send everthing up to SOS
+				int headerLength = sos - data;
+				WriteCodecData(data, headerLength);
+
+				// Send DHT
+				WriteCodecData(MJpegDht, MJpegDhtLength);
+
+				// Send remaining data
+				WriteCodecData(sos, dataLength - headerLength);
+
+				//printf("dataLength=%lu, found SOS @ %d\n", dataLength, headerLength);
+			}
+			else
+			{
+				WriteCodecData(data, dataLength);
+			}
+#endif
+
+
+			// jpeg-turbo
+			int api = tjDecompressToYUV2(jpegDecompressor,
+				data,
+				dataLength,
+				jpegYuv,
+				jpegWidth,
+				1,
+				jpegHeight,
+				TJFLAG_FASTDCT);	//TJFLAG_ACCURATEDCT
+			if (api != 0)
+			{
+				char* message = tjGetErrorStr();
+				fprintf(stderr, "tjDecompressToYUV2 failed (%s)\n", message);
+			}
+			else
+			{
+				encodeMutex.Lock();
+
+#if 0
+				// convert YUV422 to NV12
+				int srcStride = format.fmt.pix.width;
+				unsigned char* srcY = jpegYuv;
+				unsigned char* srcU = srcY + (format.fmt.pix.width * format.fmt.pix.height);
+				unsigned char* srcV = srcU + ((format.fmt.pix.width / 2) * format.fmt.pix.height);
+
+				int dstStride = format.fmt.pix.width;
+				int dstVUOffset = format.fmt.pix.width * format.fmt.pix.height;
+
+				for (int y = 0; y < format.fmt.pix.height; ++y)
+				{
+					for (int x = 0; x < format.fmt.pix.width; x += 2)
+					{
+						int srcIndex = y * srcStride + x;
+						int chromaIndex = y * (srcStride >> 1) + (x >> 1);
+
+						//unsigned char l = data[srcIndex];
+						unsigned short yu = srcY[srcIndex] | (srcU[chromaIndex] << 8);
+						unsigned short yv = srcY[srcIndex + 1] | (srcV[chromaIndex] << 8);
+
+
+						int dstIndex = y * dstStride + (x);
+						nv12[dstIndex] = yu & 0xff;
+						nv12[dstIndex + 1] = yv & 0xff;
+
+						if (y % 2 == 0)
+						{
+							int dstVUIndex = (y >> 1) * dstStride + (x);
+							nv12[dstVUOffset + dstVUIndex] = yv >> 8;
+							nv12[dstVUOffset + dstVUIndex + 1] = yu >> 8;
+						}
+					}
+				}
+
+#else
+				// Blit
+
+				{
+					// Syncronize the source data
+
+					ion_fd_data ionFdData = { 0 };
+					ionFdData.fd = YuvSource.ExportHandle;
+
+					io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
+					if (io != 0)
+					{
+						throw Exception("ION_IOC_SYNC failed.");
+					}
+				}
+
+
+				// Configure GE2D
+
+				config_para_s config = { 0 };
+
+				config.src_dst_type = ALLOC_ALLOC; //ALLOC_OSD0;
+				config.alu_const_color = 0xffffffff;
+				//GE2D_FORMAT_S16_YUV422T, GE2D_FORMAT_S16_YUV422B kernel panics
+				config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_YUV422; //GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S8_Y;
+				config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
+
+				config.src_planes[0].addr = YuvSource.PhysicalAddress;
+				config.src_planes[0].w = width;
+				config.src_planes[0].h = height;
+				config.src_planes[1].addr = config.src_planes[0].addr + (width * height);
+				config.src_planes[1].w = width / 2;
+				config.src_planes[1].h = height;
+				config.src_planes[2].addr = config.src_planes[1].addr + ((width / 2) * height);
+				config.src_planes[2].w = width / 2;
+				config.src_planes[2].h = height;
+
+				config.dst_planes[0].addr = YuvDestination.PhysicalAddress;
+				config.dst_planes[0].w = width;
+				config.dst_planes[0].h = height;
+				config.dst_planes[1].addr = config.dst_planes[0].addr + (format.fmt.pix.width * format.fmt.pix.height);
+				config.dst_planes[1].w = width;
+				config.dst_planes[1].h = height / 2;
+
+				io = ioctl(ge2d_fd, GE2D_CONFIG, &config);
+				if (io < 0)
+				{
+					throw Exception("GE2D_CONFIG failed");
+				}
+
+
+				// Perform the blit operation
+				ge2d_para_s blitRect = { 0 };
+
+				blitRect.src1_rect.x = 0;
+				blitRect.src1_rect.y = 0;
+				blitRect.src1_rect.w = width;
+				blitRect.src1_rect.h = height;
+
+				blitRect.dst_rect.x = 0;
+				blitRect.dst_rect.y = 0;
+				blitRect.dst_rect.w = width;
+				blitRect.dst_rect.h = height;
+
+				io = ioctl(ge2d_fd, GE2D_BLIT_NOALPHA, &blitRect);
+				if (io < 0)
+				{
+					throw Exception("GE2D_BLIT_NOALPHA failed.");
+				}
+
+				//printf("GE2D Blit OK.\n");
+
+
+				{
+					// Syncronize the destination data
+					ion_fd_data ionFdData = { 0 };
+					ionFdData.fd = YuvDestination.ExportHandle;
+
+					io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
+					if (io != 0)
+					{
+						throw Exception("ION_IOC_SYNC failed.");
+					}
+				}
+
+#endif
+
+				encodeMutex.Unlock();
+			}
 		}
+		else
+		{
+			throw Exception("Unsupported PictureFromat.");
+		}
+
+
+		//Preview
+		config_para_s config = { 0 };
+
+		config.src_dst_type = ALLOC_OSD0;
+		config.alu_const_color = 0xffffffff;
+
+		config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21;
+		config.src_planes[0].addr = YuvDestination.PhysicalAddress;
+		config.src_planes[0].w = width;
+		config.src_planes[0].h = height;
+		config.src_planes[1].addr = config.src_planes[0].addr + (width * height);
+		config.src_planes[1].w = width;
+		config.src_planes[1].h = height / 2;
+
+		config.dst_format = GE2D_FORMAT_S32_ARGB;
+
+		io = ioctl(ge2d_fd, GE2D_CONFIG, &config);
+		if (io < 0)
+		{
+			throw Exception("GE2D_CONFIG failed");
+		}
+
+		// Perform the blit operation
+		ge2d_para_s blitRect = { 0 };
+
+		blitRect.src1_rect.x = 0;
+		blitRect.src1_rect.y = 0;
+		blitRect.src1_rect.w = width;
+		blitRect.src1_rect.h = height;
+
+		blitRect.dst_rect.x = 0;
+		blitRect.dst_rect.y = 0;
+		blitRect.dst_rect.w = width;
+		blitRect.dst_rect.h = height;
+
+		// Note GE2D_STRETCHBLIT_NOALPHA is required to operate properly
+		io = ioctl(ge2d_fd, GE2D_STRETCHBLIT_NOALPHA, &blitRect);
+		if (io < 0)
+		{
+			throw Exception("GE2D_STRETCHBLIT_NOALPHA failed.");
+		}
+
+		//printf("GE2D Blit OK.\n");
 
 
 		// return buffer
