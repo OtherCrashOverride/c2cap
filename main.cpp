@@ -69,6 +69,8 @@ const size_t ERROR_RECOVERY_MODE_IN = 0x20;
 #include "ge2d.h"
 #include "ge2d_cmd.h"
 
+#include "vfm_grabber.h"
+
 
 const char* DEFAULT_DEVICE = "/dev/video0";
 const char* DEFAULT_OUTPUT = "default.h264";
@@ -159,7 +161,7 @@ void OpenCodec(int width, int height, int fps)
 	codecContext.am_sysinfo.width = width;
 	codecContext.am_sysinfo.height = height;
 	codecContext.am_sysinfo.rate = (96000.0 / fps);	
-	codecContext.am_sysinfo.param = (void*)(EXTERNAL_PTS | SYNC_OUTSIDE); //EXTERNAL_PTS |
+	codecContext.am_sysinfo.param = (void*)(0); //EXTERNAL_PTS | SYNC_OUTSIDE
 
 
 	int api = codec_init(&codecContext);
@@ -436,7 +438,8 @@ void WriteToFile(const char* path, const char* value)
 void SetVfmState()
 {
 	WriteToFile("/sys/class/vfm/map", "rm default");
-	WriteToFile("/sys/class/vfm/map", "add default decoder ionvideo");
+	//WriteToFile("/sys/class/vfm/map", "add default decoder ionvideo");
+	WriteToFile("/sys/class/vfm/map", "add default decoder vfm_grabber");
 }
 
 void ResetVfmState()
@@ -942,7 +945,12 @@ int main(int argc, char** argv)
 	// Ionvideo
 	SetVfmState();
 
-	IonInfo ionInfo = OpenIonVideoCapture(width, height);
+	//IonInfo ionInfo = OpenIonVideoCapture(width, height);
+	int vfmGrabberFd = open("/dev/vfm_grabber", O_RDWR);
+	if (vfmGrabberFd < 0)
+	{
+		throw Exception("open vfm_grabber failed.");
+	}
 
 
 	// Create MJPEG codec
@@ -1356,13 +1364,15 @@ int main(int argc, char** argv)
 			// Get an ionvideo frame
 			//printf("Getting ionvideo frame.\n");
 
-			v4l2_buffer ionBuffer = { 0 };
-			ionBuffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-			ionBuffer.memory = V4L2_MEMORY_DMABUF;
+			//v4l2_buffer ionBuffer = { 0 };
+			//ionBuffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			//ionBuffer.memory = V4L2_MEMORY_DMABUF;
 
 			while (true)
 			{
-				io = ioctl(ionInfo.IonVideoFD, VIDIOC_DQBUF, &ionBuffer);
+				vfm_grabber_frameinfo vfmInfo;
+
+				io = ioctl(vfmGrabberFd, VFM_GRABBER_GRAB_FRAME, &vfmInfo);
 				if (io < 0)
 				{
 					//printf("io=%d\n", io);
@@ -1370,22 +1380,27 @@ int main(int argc, char** argv)
 					break;
 				}
 
-				printf("Ionvideo frame OK.\n");
+				//printf("vfmInfo.index=%u, vfmInfo.canvas0Addr=0x%x, vfmInfo.canvas1Addr=0x%x\n",
+				//	vfmInfo.index, vfmInfo.canvas0Addr, vfmInfo.canvas1Addr);
+				//printf("vfmInfo.pts=%f, vfmInfo.duration=%u\n",
+				//	vfmInfo.pts / 96000.0, vfmInfo.duration);
+
+				//printf("vfm_grabber frame OK.\n");
 
 
-				yuvSourcePtr = mmap(NULL,
-					ionInfo.BufferSize,
-					PROT_READ | PROT_WRITE,
-					MAP_FILE | MAP_SHARED,
-					ionInfo.VideoBufferDmaBufferFD[ionBuffer.index],
-					0);
-				if (!yuvSourcePtr)
-				{
-					throw Exception("YuvSource mmap failed.");
-				}
+				//yuvSourcePtr = mmap(NULL,
+				//	ionInfo.BufferSize,
+				//	PROT_READ | PROT_WRITE,
+				//	MAP_FILE | MAP_SHARED,
+				//	ionInfo.VideoBufferDmaBufferFD[ionBuffer.index],
+				//	0);
+				//if (!yuvSourcePtr)
+				//{
+				//	throw Exception("YuvSource mmap failed.");
+				//}
 
-				YuvSource.ExportHandle = ionInfo.VideoBufferDmaBufferFD[ionBuffer.index];
-				YuvSource.PhysicalAddress = ionInfo.PhysicalAddress;
+				//YuvSource.ExportHandle = ionInfo.VideoBufferDmaBufferFD[ionBuffer.index];
+				//YuvSource.PhysicalAddress = ionInfo.PhysicalAddress;
 
 #endif
 			//{
@@ -1429,22 +1444,22 @@ int main(int argc, char** argv)
 #else
 				// Blit
 
-				{
-					// Syncronize the source data
+				//{
+				//	// Syncronize the source data
 
-					ion_fd_data ionFdData = { 0 };
-					ionFdData.fd = YuvSource.ExportHandle;
+				//	ion_fd_data ionFdData = { 0 };
+				//	ionFdData.fd = YuvSource.ExportHandle;
 
-					io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
-					if (io != 0)
-					{
-						throw Exception("ION_IOC_SYNC failed.");
-					}
-				}
+				//	io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
+				//	if (io != 0)
+				//	{
+				//		throw Exception("ION_IOC_SYNC failed.");
+				//	}
+				//}
 
 
 				// Configure GE2D
-
+#if 0
 				config_para_s config = { 0 };
 
 				config.src_dst_type = ALLOC_ALLOC; //ALLOC_OSD0;
@@ -1453,10 +1468,10 @@ int main(int argc, char** argv)
 				config.src_format = GE2D_FORMAT_M24_NV12; //GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_YUV422; //GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S8_Y;
 				config.dst_format = GE2D_FORMAT_M24_NV21; //GE2D_LITTLE_ENDIAN | //GE2D_FORMAT_S32_ARGB;
 
-				config.src_planes[0].addr = YuvSource.PhysicalAddress;
+				config.src_planes[0].addr = vfmInfo.canvas0Addr;
 				config.src_planes[0].w = width;
 				config.src_planes[0].h = height;
-				config.src_planes[1].addr = config.src_planes[0].addr + (width * height);
+				config.src_planes[1].addr = vfmInfo.canvas1Addr;
 				config.src_planes[1].w = width; // / 2;
 				config.src_planes[1].h = height;
 				//config.src_planes[2].addr = config.src_planes[1].addr + ((width / 2) * height);
@@ -1476,6 +1491,113 @@ int main(int argc, char** argv)
 					throw Exception("GE2D_CONFIG failed");
 				}
 
+#else
+				////int src_index = ((frame.canvas_plane0.index & 0xff) | ((frame.canvas_plane1.index << 8) & 0x0000ff00));
+				//struct config_para_ex_s configex = { 0 };
+
+				//configex.src_para.mem_type = CANVAS_TYPE_INVALID;
+				//configex.src_para.format = GE2D_FORMAT_M24_YUV420;
+				//configex.src_para.canvas_index = vfmInfo.canvas0Addr;
+				//configex.src_para.left = 0;
+				//configex.src_para.top = 0;
+				//configex.src_para.width = vfmInfo.width;
+				//configex.src_para.height = vfmInfo.height;
+
+
+				//configex.src2_para.mem_type = CANVAS_TYPE_INVALID;
+
+
+				//configex.dst_para.mem_type = CANVAS_ALLOC;// CANVAS_ALLOC; //  CANVAS_OSD0;
+				//configex.dst_para.format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S32_ARGB; // GE2D_FORMAT_M24_NV21; // GE2D_FORMAT_S32_ARGB;
+				////configex.dst_para.canvas_index = 0x44;
+				//configex.dst_para.left = 0;
+				//configex.dst_para.top = 0;
+				//configex.dst_para.width = width;
+				//configex.dst_para.height = height;
+				//configex.dst_planes[0].addr = YuvSource.PhysicalAddress;
+				//configex.dst_planes[0].w = width;
+				//configex.dst_planes[0].h = height;
+				////configex.dst_planes[1].addr = YuvDestination.PhysicalAddress + (width * height);
+				////configex.dst_planes[1].w = width;
+				////configex.dst_planes[1].h = height / 2;
+				////configex.dst_planes[2].addr = YuvDestination.PhysicalAddress + (width * height);
+				////configex.dst_planes[2].w = width;
+				////configex.dst_planes[2].h = height / 2;
+
+				//io = ioctl(ge2d_fd, GE2D_CONFIG_EX, &configex);
+				//if (io < 0)
+				//{
+				//	printf("GE2D_CONFIG_EX failed.\n");
+				//}
+
+
+				//{
+				//	// Perform the blit operation
+				//	ge2d_para_s blitRect = { 0 };
+
+				//	blitRect.src1_rect.x = 0;
+				//	blitRect.src1_rect.y = 0;
+				//	blitRect.src1_rect.w = width;
+				//	blitRect.src1_rect.h = height;
+
+				//	blitRect.dst_rect.x = 0;
+				//	blitRect.dst_rect.y = 0;
+				//	blitRect.dst_rect.w = width;
+				//	blitRect.dst_rect.h = height;
+
+				//	io = ioctl(ge2d_fd, GE2D_STRETCHBLIT_NOALPHA, &blitRect); //GE2D_STRETCHBLIT_NOALPHA
+				//	if (io < 0)
+				//	{
+				//		throw Exception("GE2D_BLIT_NOALPHA failed.");
+				//	}
+				//}
+
+				//{
+				//	// Syncronize the source data
+
+				//	ion_fd_data ionFdData = { 0 };
+				//	ionFdData.fd = YuvSource.ExportHandle;
+
+				//	io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
+				//	if (io != 0)
+				//	{
+				//		throw Exception("ION_IOC_SYNC failed.");
+				//	}
+				//}
+
+
+
+				config_para_s config = { 0 };
+
+				config.src_dst_type = ALLOC_ALLOC; //ALLOC_OSD0;
+				config.alu_const_color = 0xffffffff;
+
+				config.src_format = GE2D_FORMAT_M24_YUV420;
+				config.src_planes[0].addr = vfmInfo.canvas0plane0.addr;
+				config.src_planes[0].w = vfmInfo.canvas0plane0.width;
+				config.src_planes[0].h = vfmInfo.canvas0plane0.height;
+				config.src_planes[1].addr = vfmInfo.canvas0plane1.addr;
+				config.src_planes[1].w = vfmInfo.canvas0plane1.width;
+				config.src_planes[1].h = vfmInfo.canvas0plane1.height;
+				config.src_planes[2].addr = vfmInfo.canvas0plane2.addr;
+				config.src_planes[2].w = vfmInfo.canvas0plane2.width;
+				config.src_planes[2].h = vfmInfo.canvas0plane2.height;
+
+				config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
+				config.dst_planes[0].addr = YuvDestination.PhysicalAddress;
+				config.dst_planes[0].w = width;
+				config.dst_planes[0].h = height;
+				config.dst_planes[1].addr = config.dst_planes[0].addr + (format.fmt.pix.width * format.fmt.pix.height);
+				config.dst_planes[1].w = width;
+				config.dst_planes[1].h = height / 2;
+
+				io = ioctl(ge2d_fd, GE2D_CONFIG, &config);
+				if (io < 0)
+				{
+					throw Exception("GE2D_CONFIG failed");
+				}
+
+#endif
 
 				// Perform the blit operation
 				ge2d_para_s blitRect = { 0 };
@@ -1490,13 +1612,22 @@ int main(int argc, char** argv)
 				blitRect.dst_rect.w = width;
 				blitRect.dst_rect.h = height;
 
-				io = ioctl(ge2d_fd, GE2D_STRETCHBLIT_NOALPHA, &blitRect);
+				io = ioctl(ge2d_fd, GE2D_STRETCHBLIT_NOALPHA, &blitRect); //GE2D_STRETCHBLIT_NOALPHA
 				if (io < 0)
 				{
 					throw Exception("GE2D_BLIT_NOALPHA failed.");
 				}
 
 				//printf("GE2D Blit OK.\n");
+
+
+				
+				io = ioctl(vfmGrabberFd, VFM_GRABBER_HINT_INVALIDATE, 0);
+				if (io < 0)
+				{
+					throw Exception("VFM_GRABBER_HINT_INVALIDATE failed.");
+				}
+
 
 
 				{
@@ -1517,15 +1648,15 @@ int main(int argc, char** argv)
 
 
 #if 1
-				munmap(yuvSourcePtr, ionInfo.BufferSize);
+				//munmap(yuvSourcePtr, ionInfo.BufferSize);
 
 
-				// Return the buffer to V4L
-				io = ioctl(ionInfo.IonVideoFD, VIDIOC_QBUF, &ionBuffer);
-				if (io < 0)
-				{
-					throw Exception("failed to queue ionvideo buffer.");
-				}
+				//// Return the buffer to V4L
+				//io = ioctl(ionInfo.IonVideoFD, VIDIOC_QBUF, &ionBuffer);
+				//if (io < 0)
+				//{
+				//	throw Exception("failed to queue ionvideo buffer.");
+				//}
 
 #endif
 			}
@@ -1538,7 +1669,7 @@ int main(int argc, char** argv)
 
 
 
-
+#if 1
 		//Preview
 		config_para_s config = { 0 };
 
@@ -1552,6 +1683,11 @@ int main(int argc, char** argv)
 		config.src_planes[1].addr = config.src_planes[0].addr + (width * height);
 		config.src_planes[1].w = width;
 		config.src_planes[1].h = height / 2;
+
+		//config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S32_ARGB;
+		//config.src_planes[0].addr = YuvSource.PhysicalAddress;
+		//config.src_planes[0].w = width;
+		//config.src_planes[0].h = height;
 
 		config.dst_format = GE2D_FORMAT_S32_ARGB;
 
@@ -1582,6 +1718,7 @@ int main(int argc, char** argv)
 		}
 
 		//printf("GE2D Blit OK.\n");
+#endif
 
 
 		// return buffer
