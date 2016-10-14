@@ -38,21 +38,6 @@
 #include <linux/videodev2.h> // V4L
 #include <sys/mman.h>	// mmap
 
-// The headers are not aware C++ exists
-extern "C"
-{
-	//#include <amcodec/codec.h>
-#include <codec.h>
-}
-// Codec parameter flags
-//    size_t is used to make it 
-//    64bit safe for use on Odroid C2
-const size_t EXTERNAL_PTS = 0x01;
-const size_t SYNC_OUTSIDE = 0x02;
-const size_t USE_IDR_FRAMERATE = 0x04;
-const size_t UCODE_IP_ONLY_PARAM = 0x08;
-const size_t MAX_REFER_BUF = 0x10;
-const size_t ERROR_RECOVERY_MODE_IN = 0x20;
 
 #include <turbojpeg.h>
 #include <memory>
@@ -69,7 +54,8 @@ const size_t ERROR_RECOVERY_MODE_IN = 0x20;
 #include "ge2d.h"
 #include "ge2d_cmd.h"
 
-#include "vfm_grabber.h"
+#include "IonBuffer.h"
+
 
 
 const char* DEFAULT_DEVICE = "/dev/video0";
@@ -132,89 +118,6 @@ struct option longopts[] = {
 	{ 0, 0, 0, 0 }
 };
 
-//class Exception : public std::exception
-//{
-//public:
-//	Exception(const char* message)
-//		: std::exception()
-//	{
-//		fprintf(stderr, "%s\n", message);
-//	}
-//
-//};
-
-
-codec_para_t codecContext;
-void OpenCodec(int width, int height, int fps)
-{
-	//fps *= 2;
-
-	// Initialize the codec
-	codecContext = { 0 };
-
-
-	codecContext.stream_type = STREAM_TYPE_ES_VIDEO;
-	codecContext.video_type = VFORMAT_MJPEG;
-	codecContext.has_video = 1;
-	codecContext.noblock = 0;
-	codecContext.am_sysinfo.format = VIDEO_DEC_FORMAT_MJPEG;
-	codecContext.am_sysinfo.width = width;
-	codecContext.am_sysinfo.height = height;
-	codecContext.am_sysinfo.rate = (96000.0 / fps);	
-	codecContext.am_sysinfo.param = (void*)(0); //EXTERNAL_PTS | SYNC_OUTSIDE
-
-
-	int api = codec_init(&codecContext);
-	if (api != 0)
-	{
-		throw Exception("codec_init failed.");		
-	}
-}
-
-void WriteCodecData(unsigned char* data, int dataLength)
-{
-	int offset = 0;
-	while (offset < dataLength)
-	{
-		int count = codec_write(&codecContext, data + offset, dataLength - offset);
-		if (count > 0)
-		{
-			offset += count;
-		}
-	}
-}
-
-
-//timeval startTime;
-//timeval endTime;
-//
-//void ResetTime()
-//{
-//	gettimeofday(&startTime, NULL);
-//	endTime = startTime;
-//}
-//
-//float GetTime()
-//{
-//	gettimeofday(&endTime, NULL);
-//	float seconds = (endTime.tv_sec - startTime.tv_sec);
-//	float milliseconds = (float(endTime.tv_usec - startTime.tv_usec)) / 1000000.0f;
-//
-//	startTime = endTime;
-//
-//	return seconds + milliseconds;
-//}
-
-//float ConvertTimeval(timeval* value)
-//{
-//	if (value == nullptr)
-//		throw Exception("value is null.");
-//
-//	float seconds = value->tv_sec;
-//	float milliseconds = ((float)value->tv_usec) / 1000000.0f;
-//
-//	return seconds + milliseconds;
-//}
 
 
 vl_codec_handle_t handle;
@@ -243,74 +146,6 @@ void EncodeFrame()
 
 	encodeMutex.Unlock();
 
-	if (outCnt > 0)
-	{
-		ssize_t writeCount = write(encoderFileDescriptor, encodeBitstreamBuffer, outCnt);
-		if (writeCount < 0)
-		{
-			throw Exception("write failed.");
-		}
-	}
-
-
-	//unsigned int pts = timeStamp * 96000;
-	//codec_set_pcrscr(&codecContext, (int)pts);
-
-
-	timeStamp += frameRate;
-	//fprintf(stderr, "timeStamp=%f\n", timeStamp);
-}
-
-void EncodeFrameHardware()
-{
-	encodeMutex.Lock();
-
-	// Encode the video frames
-	vl_frame_type_t type = FRAME_TYPE_AUTO;
-	char* in = (char*)encodeNV12Buffer;
-	int in_size = encodeBitstreamBufferLength;
-	char* out = encodeBitstreamBuffer;
-	int outCnt = vl_video_encoder_encode(handle, type, in, in_size, &out);
-	//printf("vl_video_encoder_encode = %d\n", outCnt);
-
-
-	// Hardware
-	unsigned int pts = timeStamp * 96000;
-	//if (codec_checkin_pts(&codecContext, pts))
-	//{
-	//	printf("codec_checkin_pts failed\n");
-	//}
-
-	if (needsMJpegDht)
-	{
-		// Find the start of scan (SOS)
-		unsigned char* sos = mjpegData;
-		while (sos < mjpegData + mjpegDataLength - 1)
-		{
-			if (sos[0] == 0xff && sos[1] == 0xda)
-				break;
-
-			++sos;
-		}
-
-		// Send everthing up to SOS
-		int headerLength = sos - mjpegData;
-		WriteCodecData(mjpegData, headerLength);
-
-		// Send DHT
-		WriteCodecData(MJpegDht, MJpegDhtLength);
-
-		// Send remaining data
-		WriteCodecData(sos, mjpegDataLength - headerLength);
-
-		//printf("dataLength=%lu, found SOS @ %d\n", dataLength, headerLength);
-	}
-	else
-	{
-		WriteCodecData(mjpegData, (int)mjpegDataLength);
-	}
-
-	encodeMutex.Unlock();
 
 	if (outCnt > 0)
 	{
@@ -322,90 +157,9 @@ void EncodeFrameHardware()
 	}
 
 
-	codec_set_pcrscr(&codecContext, (int)pts);
-
-
 	timeStamp += frameRate;
-	fprintf(stderr, "timeStamp=%f\n", timeStamp);
 }
 
-
-struct IonBuffer
-{
-	ion_user_handle_t Handle;
-	int ExportHandle;
-	size_t Length;
-	unsigned long PhysicalAddress;
-};
-
-IonBuffer IonAllocate(int ion_fd, size_t bufferSize)
-{
-	int io;
-	IonBuffer result; 
-
-	// Allocate a buffer
-	ion_allocation_data allocation_data = { 0 };
-	allocation_data.len = bufferSize;
-	allocation_data.heap_id_mask = ION_HEAP_CARVEOUT_MASK;
-	allocation_data.flags = ION_FLAG_CACHED;
-
-	io = ioctl(ion_fd, ION_IOC_ALLOC, &allocation_data);
-	if (io != 0)
-	{
-		throw Exception("ION_IOC_ALLOC failed.");
-	}
-
-	printf("ion handle=%d\n", allocation_data.handle);
-
-
-	// Map/share the buffer
-	ion_fd_data ionData = { 0 };
-	ionData.handle = allocation_data.handle;
-
-	io = ioctl(ion_fd, ION_IOC_SHARE, &ionData);
-	if (io != 0)
-	{
-		throw Exception("ION_IOC_SHARE failed.");
-	}
-
-	printf("ion map=%d\n", ionData.fd);
-
-
-	// Get the physical address for the buffer
-	meson_phys_data physData = { 0 };
-	physData.handle = ionData.fd;
-
-	ion_custom_data ionCustomData = { 0 };
-	ionCustomData.cmd = ION_IOC_MESON_PHYS_ADDR;
-	ionCustomData.arg = (long unsigned int)&physData;
-
-	io = ioctl(ion_fd, ION_IOC_CUSTOM, &ionCustomData);
-	if (io != 0)
-	{
-		//throw Exception("ION_IOC_CUSTOM failed.");
-		printf("ION_IOC_CUSTOM failed (%d).", io);
-	}
-
-
-	result.Handle = allocation_data.handle;
-	result.ExportHandle = ionData.fd;
-	result.Length = allocation_data.len;
-	result.PhysicalAddress = physData.phys_addr;
-
-	printf("ion phys_addr=%lu\n", result.PhysicalAddress);
-
-
-	//ion_handle_data ionHandleData = { 0 };
-	//ionHandleData.handle = allocation_data.handle;
-
-	//io = ioctl(ion_fd, ION_IOC_FREE, &ionHandleData);
-	//if (io != 0)
-	//{
-	//	throw Exception("ION_IOC_FREE failed.");
-	//}
-
-	return result;
-}
 
 
 enum class PictureFormat
@@ -417,212 +171,12 @@ enum class PictureFormat
 
 
 
-void WriteToFile(const char* path, const char* value)
-{
-	int fd = open(path, O_RDWR | O_TRUNC, 0644);
-	if (fd < 0)
-	{
-		printf("WriteToFile open failed: %s = %s\n", path, value);
-		exit(1);
-	}
-
-	if (write(fd, value, strlen(value)) < 0)
-	{
-		printf("WriteToFile write failed: %s = %s\n", path, value);
-		exit(1);
-	}
-
-	close(fd);
-}
-
-void SetVfmState()
-{
-	WriteToFile("/sys/class/vfm/map", "rm default");
-	//WriteToFile("/sys/class/vfm/map", "add default decoder ionvideo");
-	WriteToFile("/sys/class/vfm/map", "add default decoder vfm_grabber");
-}
-
-void ResetVfmState()
-{
-	WriteToFile("/sys/class/vfm/map", "rm default");
-	WriteToFile("/sys/class/vfm/map", "add default decoder ppmgr deinterlace amvideo");
-}
-
-struct IonInfo
-{
-	int IonFD;
-	int IonVideoFD;
-	size_t BufferSize;
-	unsigned long PhysicalAddress;
-	int VideoBufferDmaBufferFD[BUFFER_COUNT];
-};
-
-IonInfo OpenIonVideoCapture(int width, int height)
-{
-	const int VIDEO_WIDTH = width;
-	const int VIDEO_HEIGHT = height;
-	const unsigned int VIDEO_FORMAT = V4L2_PIX_FMT_NV12;
-	const int VIDEO_FRAME_SIZE = VIDEO_WIDTH * VIDEO_HEIGHT;
-	//const int BUFFER_COUNT = 2;
-
-
-	IonInfo info = { 0 };
-
-	info.IonVideoFD = open("/dev/video13", O_RDWR | O_NONBLOCK); //| O_NONBLOCK
-	if (info.IonVideoFD < 0)
-	{
-		throw Exception("open ionvideo failed.");
-	}
-
-	//printf("ionvideo file handle: %x\n", info.IonVideoFD);
-
-
-	info.IonFD = open("/dev/ion", O_RDWR);
-	if (info.IonFD < 0)
-	{
-		throw Exception("open ion failed.");
-	}
-
-	//printf("ion file handle: %x\n", info.IonFD);
-
-
-	// Set the capture format
-	v4l2_format format = { 0 };
-	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	format.fmt.pix_mp.width = VIDEO_WIDTH;
-	format.fmt.pix_mp.height = VIDEO_HEIGHT;
-	format.fmt.pix_mp.pixelformat = VIDEO_FORMAT;
-
-	int v4lcall = ioctl(info.IonVideoFD, VIDIOC_S_FMT, &format);
-	if (v4lcall < 0)
-	{
-		throw Exception("ionvideo VIDIOC_S_FMT failed.");
-	}
-
-
-	// Request buffers
-	v4l2_requestbuffers requestBuffers = { 0 };
-	requestBuffers.count = BUFFER_COUNT;
-	requestBuffers.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	requestBuffers.memory = V4L2_MEMORY_DMABUF;
-
-	v4lcall = ioctl(info.IonVideoFD, VIDIOC_REQBUFS, &requestBuffers);
-	if (v4lcall < 0)
-	{
-		throw Exception("ionvideo VIDIOC_REQBUFS failed.");
-	}
-
-
-	// Allocate buffers
-	int videoFrameLength = 0;
-	switch (format.fmt.pix_mp.pixelformat)
-	{
-		case V4L2_PIX_FMT_RGB32:
-			videoFrameLength = VIDEO_FRAME_SIZE * 4;
-			break;
-
-		case V4L2_PIX_FMT_NV12:
-			videoFrameLength = VIDEO_FRAME_SIZE * 2;
-			break;
-
-		default:
-			throw Exception("Unsupported video formated.");
-	}
-	
-	info.BufferSize = videoFrameLength;
-
-
-	for (int i = 0; i < BUFFER_COUNT; ++i)
-	{
-		// Allocate a buffer
-		ion_allocation_data allocation_data = { 0 };
-		allocation_data.len = videoFrameLength;
-		allocation_data.heap_id_mask = ION_HEAP_CARVEOUT_MASK;
-		allocation_data.flags = ION_FLAG_CACHED;
-
-		int ionCall = ioctl(info.IonFD, ION_IOC_ALLOC, &allocation_data);
-		if (ionCall != 0)
-		{
-			throw Exception("failed to allocate ion buffer.");
-		}
-
-
-		// Export the dma_buf
-		ion_fd_data fd_data = { 0 };
-		fd_data.handle = allocation_data.handle;
-
-		ionCall = ioctl(info.IonFD, ION_IOC_SHARE, &fd_data);
-		if (ionCall < 0)
-		{
-			throw Exception("failed to retrieve ion dma_buf handle");
-		}
-
-		info.VideoBufferDmaBufferFD[i] = fd_data.fd;
-
-
-		// Physical Address
-		// Get the physical address for the buffer
-		meson_phys_data physData = { 0 };
-		physData.handle = fd_data.fd;
-
-		ion_custom_data ionCustomData = { 0 };
-		ionCustomData.cmd = ION_IOC_MESON_PHYS_ADDR;
-		ionCustomData.arg = (long unsigned int)&physData;
-
-		ionCall = ioctl(info.IonFD, ION_IOC_CUSTOM, &ionCustomData);
-		if (ionCall != 0)
-		{
-			throw Exception("ION_IOC_CUSTOM failed.");
-			//printf("ION_IOC_CUSTOM failed (%d).", io);
-		}
-
-		info.PhysicalAddress = physData.phys_addr;
-
-
-		// Queue the buffer for V4L to use
-		v4l2_buffer buffer = { 0 };
-
-		buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		buffer.memory = V4L2_MEMORY_DMABUF;
-		buffer.index = i;
-		buffer.m.fd = info.VideoBufferDmaBufferFD[i];
-		buffer.length = 1;	// Ionvideo only supports single plane
-
-		v4lcall = ioctl(info.IonVideoFD, VIDIOC_QBUF, &buffer);
-		if (v4lcall < 0)
-		{
-			throw Exception("failed to queue ion buffer.");
-		}
-
-		// DEBUG
-		//printf("Queued v4l2_buffer:\n");
-		//printf("\tindex=%x\n", buffer.index);
-		//printf("\ttype=%x\n", buffer.type);
-		//printf("\tm.fd=%x\n", buffer.m.fd);
-	}
-
-
-	// Start "streaming"
-	int bufferType = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
-	v4lcall = ioctl(info.IonVideoFD, VIDIOC_STREAMON, &bufferType);
-	if (v4lcall < 0)
-	{
-		throw Exception("ionvideo VIDIOC_STREAMON failed.");
-	}
-
-
-	return info;
-}
-
-
-
 Stopwatch sw;
 Timer timer;
 
-int ion_fd = -1;
-IonBuffer YuvSource = { 0 };
-IonBuffer YuvDestination = { 0 };
+//int ion_fd = -1;
+std::shared_ptr<IonBuffer> YuvSource;
+std::shared_ptr<IonBuffer> YuvDestination;
 
 
 int main(int argc, char** argv)
@@ -703,9 +257,9 @@ int main(int argc, char** argv)
 		throw Exception("VIDIOC_QUERYCAP failed.");
 	}
 
-	printf("card = %s\n", (char*)caps.card);
-	printf("\tbus_info = %s\n", (char*)caps.bus_info);
-	printf("\tdriver = %s\n", (char*)caps.driver);
+	fprintf(stderr, "card = %s\n", (char*)caps.card);
+	fprintf(stderr, "\tbus_info = %s\n", (char*)caps.bus_info);
+	fprintf(stderr, "\tdriver = %s\n", (char*)caps.driver);
 
 	if (!caps.capabilities & V4L2_CAP_VIDEO_CAPTURE)
 	{
@@ -817,7 +371,7 @@ int main(int argc, char** argv)
 
 	// Note: Video is encoded at the requested framerate whether
 	// the device produces it or not.  Therefore, there is no
-	// need to read back teh fps.
+	// need to read back the fps.
 
 
 	// Request buffers
@@ -906,20 +460,13 @@ int main(int argc, char** argv)
 
 
 	// Ion
-	ion_fd = open("/dev/ion", O_RDWR);
-	if (ion_fd < 0)
-	{
-		throw Exception("open ion failed.");
-	}
-
-
-	YuvSource = IonAllocate(ion_fd, width * height * 4);
+	YuvSource = std::make_shared<IonBuffer>(width * height * 4);
 	
 	void* yuvSourcePtr = mmap(NULL,
-		YuvSource.Length,
+		YuvSource->Length(),
 		PROT_READ | PROT_WRITE,
 		MAP_FILE | MAP_SHARED,
-		YuvSource.ExportHandle,
+		YuvSource->ExportHandle(),
 		0);
 	if (!yuvSourcePtr)
 	{
@@ -927,13 +474,13 @@ int main(int argc, char** argv)
 	}
 
 
-	YuvDestination = IonAllocate(ion_fd, width * height * 4);
+	YuvDestination = std::make_shared<IonBuffer>(width * height * 4);
 
 	void* yuvDestinationPtr = mmap(NULL,
-		YuvDestination.Length,
+		YuvDestination->Length(),
 		PROT_READ | PROT_WRITE,
 		MAP_FILE | MAP_SHARED,
-		YuvDestination.ExportHandle,
+		YuvDestination->ExportHandle(),
 		0);
 	if (!yuvDestinationPtr)
 	{
@@ -942,22 +489,7 @@ int main(int argc, char** argv)
 
 
 
-	// Ionvideo
-	SetVfmState();
 
-	//IonInfo ionInfo = OpenIonVideoCapture(width, height);
-	int vfmGrabberFd = open("/dev/vfm_grabber", O_RDWR);
-	if (vfmGrabberFd < 0)
-	{
-		throw Exception("open vfm_grabber failed.");
-	}
-
-
-	// Create MJPEG codec
-	OpenCodec(width, height, 60 /*fps*/);
-
-
-#if 1
 	// Initialize the encoder
 	vl_codec_id_t codec_id = CODEC_ID_H264;
 	width = format.fmt.pix.width;
@@ -965,7 +497,7 @@ int main(int argc, char** argv)
 	fps = (int)((double)streamParm.parm.capture.timeperframe.denominator /
 				(double)streamParm.parm.capture.timeperframe.numerator);
 	//int bit_rate = bitrate;
-	int gop = 10;
+	const int gop = 10;
 
 	fprintf(stderr, "vl_video_encoder_init: width=%d, height=%d, fps=%d, bitrate=%d, gop=%d\n",
 		width, height, fps, bitrate, gop);
@@ -973,7 +505,7 @@ int main(int argc, char** argv)
 	vl_img_format_t img_format = IMG_FMT_NV12;
 	handle = vl_video_encoder_init(codec_id, width, height, fps, bitrate, gop, img_format);
 	fprintf(stderr, "handle = %ld\n", handle);
-#endif
+
 
 
 	// Start streaming
@@ -1032,25 +564,6 @@ int main(int argc, char** argv)
 		}
 
 
-		//float timestamp = ConvertTimeval(&buffer.timestamp);
-		//float elapsedTime = timestamp - lastTimestamp;
-
-		//printf("Got a buffer: index=%d, timestamp=%f, elapsed=%f\n", buffer.index, timestamp, elapsedTime);
-
-		/*
-		__u32	type	Frame rate the timecodes are based on, see Table 3-6.
-		__u32	flags	Timecode flags, see Table 3-7.
-		__u8	frames	Frame count, 0 ... 23/24/29/49/59, depending on the type of timecode.
-		__u8	seconds	Seconds count, 0 ... 59. This is a binary, not BCD number.
-		__u8	minutes	Minutes count, 0 ... 59. This is a binary, not BCD number.
-		__u8	hours	Hours count, 0 ... 29. This is a binary, not BCD number.
-		__u8	userbits[4]	The "user group" bits from the timecode.
-		*/
-		//printf("\ttype=%d, flags=%d, frames=%d, seconds=%d, minutes=%d, hours=%d\n",
-		//	buffer.timecode.type, buffer.timecode.flags, buffer.timecode.frames, buffer.timecode.seconds, buffer.timecode.minutes, buffer.timecode.hours);
-
-		//lastTimestamp = timestamp;
-
 		if (pixformat == PictureFormat::Yuyv)
 		{
 			if (isFirstFrame)
@@ -1063,44 +576,13 @@ int main(int argc, char** argv)
 
 
 			// Process frame
-
-#if 0
-			//printf("Got a buffer: index = %d\n", buffer.index);
-			unsigned short* data = (unsigned short*)bufferMappings[buffer.index].Start;
-
-			// convert YUYV to NV12
-			int srcStride = format.fmt.pix.width; // *sizeof(short);
-			int dstStride = format.fmt.pix.width;
-			int dstVUOffset = format.fmt.pix.width * format.fmt.pix.height;
-
-			for (int y = 0; y < format.fmt.pix.height; ++y)
-			{
-				for (int x = 0; x < format.fmt.pix.width; x += 2)
-				{
-					int srcIndex = y * srcStride + x;
-					//unsigned char l = data[srcIndex];
-					unsigned short yu = data[srcIndex];
-					unsigned short yv = data[srcIndex + 1];
-
-
-					int dstIndex = y * dstStride + (x);
-					nv12[dstIndex] = yu & 0xff;
-					nv12[dstIndex + 1] = yv & 0xff;
-
-					if (y % 2 == 0)
-					{
-						int dstVUIndex = (y >> 1) * dstStride + (x);
-						nv12[dstVUOffset + dstVUIndex] = yv >> 8;
-						nv12[dstVUOffset + dstVUIndex + 1] = yu >> 8;
-					}
-				}
-			}
-#else
-			// Blit
-
 			encodeMutex.Lock();
 
 
+			//printf("Got a buffer: index = %d\n", buffer.index);
+
+
+			// Blit
 			unsigned char* data = (unsigned char*)bufferMappings[buffer.index].Start;
 			size_t dataLength = buffer.bytesused;
 
@@ -1118,37 +600,24 @@ int main(int argc, char** argv)
 			}
 #endif
 
-			//jpegYuv = (unsigned char*)yuvSourcePtr;
 
-
-			{
-				// Syncronize the source data
-
-				ion_fd_data ionFdData = { 0 };
-				ionFdData.fd = YuvSource.ExportHandle;
-
-				io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
-				if (io != 0)
-				{
-					throw Exception("ION_IOC_SYNC failed.");
-				}
-			}
+			YuvSource->Sync();
 
 
 			// Configure GE2D
 
 			config_para_s config = { 0 };
 
-			config.src_dst_type =ALLOC_ALLOC; //ALLOC_OSD0;
+			config.src_dst_type = ALLOC_ALLOC; //; //ALLOC_OSD0;
 			config.alu_const_color = 0xffffffff;
 			
 			config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FMT_S16_YUV422;
-			config.src_planes[0].addr = YuvSource.PhysicalAddress;
+			config.src_planes[0].addr = YuvSource->PhysicalAddress();
 			config.src_planes[0].w = width;
 			config.src_planes[0].h = height;
 
-			config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
-			config.dst_planes[0].addr = YuvDestination.PhysicalAddress;
+			config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //; //GE2D_FORMAT_S32_ARGB;
+			config.dst_planes[0].addr = YuvDestination->PhysicalAddress();
 			config.dst_planes[0].w = width;
 			config.dst_planes[0].h = height;
 			config.dst_planes[1].addr = config.dst_planes[0].addr + (format.fmt.pix.width * format.fmt.pix.height);
@@ -1183,24 +652,9 @@ int main(int argc, char** argv)
 
 			//printf("GE2D Blit OK.\n");
 
-
-			{
-				// Syncronize the destination data
-				ion_fd_data ionFdData = { 0 };
-				ionFdData.fd = YuvDestination.ExportHandle;
-
-				io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
-				if (io != 0)
-				{
-					throw Exception("ION_IOC_SYNC failed.");
-				}
-			}
-
-#endif
+			YuvDestination->Sync();
 
 			encodeMutex.Unlock();
-
-
 		}
 		else if (pixformat == PictureFormat::MJpeg)
 		{
@@ -1282,39 +736,6 @@ int main(int argc, char** argv)
 #endif
 
 
-#if 0
-			if (needsMJpegDht)
-			{
-				// Find the start of scan (SOS)
-				unsigned char* sos = data;
-				while (sos < data + dataLength - 1)
-				{
-					if (sos[0] == 0xff && sos[1] == 0xda)
-						break;
-
-					++sos;
-				}
-
-				// Send everthing up to SOS
-				int headerLength = sos - data;
-				WriteCodecData(data, headerLength);
-
-				// Send DHT
-				WriteCodecData(MJpegDht, MJpegDhtLength);
-
-				// Send remaining data
-				WriteCodecData(sos, dataLength - headerLength);
-
-				//printf("dataLength=%lu, found SOS @ %d\n", dataLength, headerLength);
-			}
-			else
-			{
-				WriteCodecData(data, dataLength);
-			}
-#endif
-
-
-#if 0
 			// jpeg-turbo
 			int api = tjDecompressToYUV2(jpegDecompressor,
 				data,
@@ -1330,155 +751,33 @@ int main(int argc, char** argv)
 				fprintf(stderr, "tjDecompressToYUV2 failed (%s)\n", message);
 			}
 			else
-#else
-			if (needsMJpegDht)
 			{
-				// Find the start of scan (SOS)
-				unsigned char* sos = data;
-				while (sos < data + dataLength - 1)
-				{
-					if (sos[0] == 0xff && sos[1] == 0xda)
-						break;
-
-					++sos;
-				}
-
-				// Send everthing up to SOS
-				int headerLength = sos - data;
-				WriteCodecData(data, headerLength);
-
-				// Send DHT
-				WriteCodecData(MJpegDht, MJpegDhtLength);
-
-				// Send remaining data
-				WriteCodecData(sos, dataLength - headerLength);
-
-				//printf("dataLength=%lu, found SOS @ %d\n", dataLength, headerLength);
-			}
-			else
-			{
-				WriteCodecData(data, dataLength);
-			}
-
-
-			// Get an ionvideo frame
-			//printf("Getting ionvideo frame.\n");
-
-			//v4l2_buffer ionBuffer = { 0 };
-			//ionBuffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-			//ionBuffer.memory = V4L2_MEMORY_DMABUF;
-
-			while (true)
-			{
-				vfm_grabber_frameinfo vfmInfo;
-
-				io = ioctl(vfmGrabberFd, VFM_GRABBER_GRAB_FRAME, &vfmInfo);
-				if (io < 0)
-				{
-					//printf("io=%d\n", io);
-					//throw Exception("failed to dequeue ionvideo buffer.");
-					break;
-				}
-
-				//printf("vfmInfo.index=%u, vfmInfo.canvas0Addr=0x%x, vfmInfo.canvas1Addr=0x%x\n",
-				//	vfmInfo.index, vfmInfo.canvas0Addr, vfmInfo.canvas1Addr);
-				//printf("vfmInfo.pts=%f, vfmInfo.duration=%u\n",
-				//	vfmInfo.pts / 96000.0, vfmInfo.duration);
-
-				//printf("vfm_grabber frame OK.\n");
-
-
-				//yuvSourcePtr = mmap(NULL,
-				//	ionInfo.BufferSize,
-				//	PROT_READ | PROT_WRITE,
-				//	MAP_FILE | MAP_SHARED,
-				//	ionInfo.VideoBufferDmaBufferFD[ionBuffer.index],
-				//	0);
-				//if (!yuvSourcePtr)
-				//{
-				//	throw Exception("YuvSource mmap failed.");
-				//}
-
-				//YuvSource.ExportHandle = ionInfo.VideoBufferDmaBufferFD[ionBuffer.index];
-				//YuvSource.PhysicalAddress = ionInfo.PhysicalAddress;
-
-#endif
-			//{
 				encodeMutex.Lock();
 
-#if 0
-				// convert YUV422 to NV12
-				int srcStride = format.fmt.pix.width;
-				unsigned char* srcY = jpegYuv;
-				unsigned char* srcU = srcY + (format.fmt.pix.width * format.fmt.pix.height);
-				unsigned char* srcV = srcU + ((format.fmt.pix.width / 2) * format.fmt.pix.height);
 
-				int dstStride = format.fmt.pix.width;
-				int dstVUOffset = format.fmt.pix.width * format.fmt.pix.height;
+				// Blit - convert YUV422 to NV12
 
-				for (int y = 0; y < format.fmt.pix.height; ++y)
-				{
-					for (int x = 0; x < format.fmt.pix.width; x += 2)
-					{
-						int srcIndex = y * srcStride + x;
-						int chromaIndex = y * (srcStride >> 1) + (x >> 1);
-
-						//unsigned char l = data[srcIndex];
-						unsigned short yu = srcY[srcIndex] | (srcU[chromaIndex] << 8);
-						unsigned short yv = srcY[srcIndex + 1] | (srcV[chromaIndex] << 8);
+				YuvSource->Sync();
 
 
-						int dstIndex = y * dstStride + (x);
-						nv12[dstIndex] = yu & 0xff;
-						nv12[dstIndex + 1] = yv & 0xff;
-
-						if (y % 2 == 0)
-						{
-							int dstVUIndex = (y >> 1) * dstStride + (x);
-							nv12[dstVUOffset + dstVUIndex] = yv >> 8;
-							nv12[dstVUOffset + dstVUIndex + 1] = yu >> 8;
-						}
-					}
-				}
-
-#else
-				// Blit
-
-				//{
-				//	// Syncronize the source data
-
-				//	ion_fd_data ionFdData = { 0 };
-				//	ionFdData.fd = YuvSource.ExportHandle;
-
-				//	io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
-				//	if (io != 0)
-				//	{
-				//		throw Exception("ION_IOC_SYNC failed.");
-				//	}
-				//}
-
-
-				// Configure GE2D
-#if 0
 				config_para_s config = { 0 };
 
-				config.src_dst_type = ALLOC_ALLOC; //ALLOC_OSD0;
+				config.src_dst_type = ALLOC_ALLOC; //ALLOC_ALLOC; //ALLOC_OSD0;
 				config.alu_const_color = 0xffffffff;
-				//GE2D_FORMAT_S16_YUV422T, GE2D_FORMAT_S16_YUV422B kernel panics
-				config.src_format = GE2D_FORMAT_M24_NV12; //GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_YUV422; //GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S8_Y;
-				config.dst_format = GE2D_FORMAT_M24_NV21; //GE2D_LITTLE_ENDIAN | //GE2D_FORMAT_S32_ARGB;
 
-				config.src_planes[0].addr = vfmInfo.canvas0Addr;
+				config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_YUV422;
+				config.src_planes[0].addr = YuvSource->PhysicalAddress();
 				config.src_planes[0].w = width;
 				config.src_planes[0].h = height;
-				config.src_planes[1].addr = vfmInfo.canvas1Addr;
-				config.src_planes[1].w = width; // / 2;
+				config.src_planes[1].addr = config.src_planes[0].addr + (width * height);
+				config.src_planes[1].w = width / 2;
 				config.src_planes[1].h = height;
-				//config.src_planes[2].addr = config.src_planes[1].addr + ((width / 2) * height);
-				//config.src_planes[2].w = width / 2;
-				//config.src_planes[2].h = height;
+				config.src_planes[2].addr = config.src_planes[1].addr + ((width / 2) * height);
+				config.src_planes[2].w = width / 2;
+				config.src_planes[2].h = height;
 
-				config.dst_planes[0].addr = YuvDestination.PhysicalAddress;
+				config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
+				config.dst_planes[0].addr = YuvDestination->PhysicalAddress();
 				config.dst_planes[0].w = width;
 				config.dst_planes[0].h = height;
 				config.dst_planes[1].addr = config.dst_planes[0].addr + (format.fmt.pix.width * format.fmt.pix.height);
@@ -1490,114 +789,6 @@ int main(int argc, char** argv)
 				{
 					throw Exception("GE2D_CONFIG failed");
 				}
-
-#else
-				////int src_index = ((frame.canvas_plane0.index & 0xff) | ((frame.canvas_plane1.index << 8) & 0x0000ff00));
-				//struct config_para_ex_s configex = { 0 };
-
-				//configex.src_para.mem_type = CANVAS_TYPE_INVALID;
-				//configex.src_para.format = GE2D_FORMAT_M24_YUV420;
-				//configex.src_para.canvas_index = vfmInfo.canvas0Addr;
-				//configex.src_para.left = 0;
-				//configex.src_para.top = 0;
-				//configex.src_para.width = vfmInfo.width;
-				//configex.src_para.height = vfmInfo.height;
-
-
-				//configex.src2_para.mem_type = CANVAS_TYPE_INVALID;
-
-
-				//configex.dst_para.mem_type = CANVAS_ALLOC;// CANVAS_ALLOC; //  CANVAS_OSD0;
-				//configex.dst_para.format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S32_ARGB; // GE2D_FORMAT_M24_NV21; // GE2D_FORMAT_S32_ARGB;
-				////configex.dst_para.canvas_index = 0x44;
-				//configex.dst_para.left = 0;
-				//configex.dst_para.top = 0;
-				//configex.dst_para.width = width;
-				//configex.dst_para.height = height;
-				//configex.dst_planes[0].addr = YuvSource.PhysicalAddress;
-				//configex.dst_planes[0].w = width;
-				//configex.dst_planes[0].h = height;
-				////configex.dst_planes[1].addr = YuvDestination.PhysicalAddress + (width * height);
-				////configex.dst_planes[1].w = width;
-				////configex.dst_planes[1].h = height / 2;
-				////configex.dst_planes[2].addr = YuvDestination.PhysicalAddress + (width * height);
-				////configex.dst_planes[2].w = width;
-				////configex.dst_planes[2].h = height / 2;
-
-				//io = ioctl(ge2d_fd, GE2D_CONFIG_EX, &configex);
-				//if (io < 0)
-				//{
-				//	printf("GE2D_CONFIG_EX failed.\n");
-				//}
-
-
-				//{
-				//	// Perform the blit operation
-				//	ge2d_para_s blitRect = { 0 };
-
-				//	blitRect.src1_rect.x = 0;
-				//	blitRect.src1_rect.y = 0;
-				//	blitRect.src1_rect.w = width;
-				//	blitRect.src1_rect.h = height;
-
-				//	blitRect.dst_rect.x = 0;
-				//	blitRect.dst_rect.y = 0;
-				//	blitRect.dst_rect.w = width;
-				//	blitRect.dst_rect.h = height;
-
-				//	io = ioctl(ge2d_fd, GE2D_STRETCHBLIT_NOALPHA, &blitRect); //GE2D_STRETCHBLIT_NOALPHA
-				//	if (io < 0)
-				//	{
-				//		throw Exception("GE2D_BLIT_NOALPHA failed.");
-				//	}
-				//}
-
-				//{
-				//	// Syncronize the source data
-
-				//	ion_fd_data ionFdData = { 0 };
-				//	ionFdData.fd = YuvSource.ExportHandle;
-
-				//	io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
-				//	if (io != 0)
-				//	{
-				//		throw Exception("ION_IOC_SYNC failed.");
-				//	}
-				//}
-
-
-
-				config_para_s config = { 0 };
-
-				config.src_dst_type = ALLOC_ALLOC; //ALLOC_OSD0;
-				config.alu_const_color = 0xffffffff;
-
-				config.src_format = GE2D_FORMAT_M24_YUV420;
-				config.src_planes[0].addr = vfmInfo.canvas0plane0.addr;
-				config.src_planes[0].w = vfmInfo.canvas0plane0.width;
-				config.src_planes[0].h = vfmInfo.canvas0plane0.height;
-				config.src_planes[1].addr = vfmInfo.canvas0plane1.addr;
-				config.src_planes[1].w = vfmInfo.canvas0plane1.width;
-				config.src_planes[1].h = vfmInfo.canvas0plane1.height;
-				config.src_planes[2].addr = vfmInfo.canvas0plane2.addr;
-				config.src_planes[2].w = vfmInfo.canvas0plane2.width;
-				config.src_planes[2].h = vfmInfo.canvas0plane2.height;
-
-				config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
-				config.dst_planes[0].addr = YuvDestination.PhysicalAddress;
-				config.dst_planes[0].w = width;
-				config.dst_planes[0].h = height;
-				config.dst_planes[1].addr = config.dst_planes[0].addr + (format.fmt.pix.width * format.fmt.pix.height);
-				config.dst_planes[1].w = width;
-				config.dst_planes[1].h = height / 2;
-
-				io = ioctl(ge2d_fd, GE2D_CONFIG, &config);
-				if (io < 0)
-				{
-					throw Exception("GE2D_CONFIG failed");
-				}
-
-#endif
 
 				// Perform the blit operation
 				ge2d_para_s blitRect = { 0 };
@@ -1612,53 +803,17 @@ int main(int argc, char** argv)
 				blitRect.dst_rect.w = width;
 				blitRect.dst_rect.h = height;
 
-				io = ioctl(ge2d_fd, GE2D_STRETCHBLIT_NOALPHA, &blitRect); //GE2D_STRETCHBLIT_NOALPHA
+				io = ioctl(ge2d_fd, GE2D_BLIT_NOALPHA, &blitRect);
 				if (io < 0)
 				{
 					throw Exception("GE2D_BLIT_NOALPHA failed.");
 				}
 
-				//printf("GE2D Blit OK.\n");
 
+				YuvDestination->Sync();
 
-				
-				io = ioctl(vfmGrabberFd, VFM_GRABBER_HINT_INVALIDATE, 0);
-				if (io < 0)
-				{
-					throw Exception("VFM_GRABBER_HINT_INVALIDATE failed.");
-				}
-
-
-
-				{
-					// Syncronize the destination data
-					ion_fd_data ionFdData = { 0 };
-					ionFdData.fd = YuvDestination.ExportHandle;
-
-					io = ioctl(ion_fd, ION_IOC_SYNC, &ionFdData);
-					if (io != 0)
-					{
-						throw Exception("ION_IOC_SYNC failed.");
-					}
-				}
-
-#endif
 
 				encodeMutex.Unlock();
-
-
-#if 1
-				//munmap(yuvSourcePtr, ionInfo.BufferSize);
-
-
-				//// Return the buffer to V4L
-				//io = ioctl(ionInfo.IonVideoFD, VIDIOC_QBUF, &ionBuffer);
-				//if (io < 0)
-				//{
-				//	throw Exception("failed to queue ionvideo buffer.");
-				//}
-
-#endif
 			}
 		}
 		else
@@ -1677,7 +832,7 @@ int main(int argc, char** argv)
 		config.alu_const_color = 0xffffffff;
 
 		config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21;
-		config.src_planes[0].addr = YuvDestination.PhysicalAddress;
+		config.src_planes[0].addr = YuvDestination->PhysicalAddress();
 		config.src_planes[0].w = width;
 		config.src_planes[0].h = height;
 		config.src_planes[1].addr = config.src_planes[0].addr + (width * height);
