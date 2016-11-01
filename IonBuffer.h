@@ -91,7 +91,7 @@ public:
 		ion_allocation_data allocation_data = { 0 };
 		allocation_data.len = bufferSize;
 		allocation_data.heap_id_mask = ION_HEAP_CARVEOUT_MASK;
-		allocation_data.flags = ION_FLAG_CACHED;
+		allocation_data.flags = ION_FLAG_CACHED_NEEDS_SYNC; //ION_FLAG_CACHED;
 
 		io = ioctl(ion_fd, ION_IOC_ALLOC, &allocation_data);
 		if (io != 0)

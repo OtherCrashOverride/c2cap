@@ -601,7 +601,7 @@ int main(int argc, char** argv)
 #endif
 
 
-			YuvSource->Sync();
+			//YuvSource->Sync();
 
 
 			// Configure GE2D
@@ -652,7 +652,7 @@ int main(int argc, char** argv)
 
 			//printf("GE2D Blit OK.\n");
 
-			YuvDestination->Sync();
+			//YuvDestination->Sync();
 
 			encodeMutex.Unlock();
 		}
@@ -757,7 +757,7 @@ int main(int argc, char** argv)
 
 				// Blit - convert YUV422 to NV12
 
-				YuvSource->Sync();
+				//YuvSource->Sync();
 
 
 				config_para_s config = { 0 };
@@ -810,7 +810,7 @@ int main(int argc, char** argv)
 				}
 
 
-				YuvDestination->Sync();
+				//YuvDestination->Sync();
 
 
 				encodeMutex.Unlock();
