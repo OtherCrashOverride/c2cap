@@ -41,7 +41,7 @@
 
 #include <turbojpeg.h>
 #include <memory>
-
+#include <ctime>
 
 #include "Exception.h"
 #include "Stopwatch.h"
@@ -55,6 +55,7 @@
 #include "ge2d_cmd.h"
 
 #include "IonBuffer.h"
+#include "FontData.h"
 
 
 
@@ -175,9 +176,167 @@ Stopwatch sw;
 Timer timer;
 
 //int ion_fd = -1;
+int ge2d_fd = -1;
 std::shared_ptr<IonBuffer> YuvSource;
 std::shared_ptr<IonBuffer> YuvDestination;
 
+std::shared_ptr<IonBuffer> TimeStampBuffer;
+uint8_t* TimeStampMapping;
+
+void TimeStamp(int width, int height)
+{
+	const int WIDTH = 28 * 8; //320; //640;
+	const int HEIGHT = 16;
+
+	if (!TimeStampBuffer)
+	{
+		TimeStampBuffer = std::make_shared<IonBuffer>(WIDTH * HEIGHT);
+
+		TimeStampMapping = (uint8_t*)mmap(NULL,
+			TimeStampBuffer->Length(),
+			PROT_READ | PROT_WRITE,
+			MAP_FILE | MAP_SHARED,
+			TimeStampBuffer->ExportHandle(),
+			0);
+	}
+
+
+	// Ridiculously over complicated way to get a timestamp
+
+	// used for calendar date and hours, minutes
+	time_t rawtime;
+	struct tm* timeinfo;
+
+	// used for microseconds
+	timeval tv;
+	gettimeofday(&tv, 0);
+
+	time(&rawtime);
+	timeinfo = localtime(&rawtime);
+
+	const int COLUMNS = WIDTH / 8;
+	
+	char text[COLUMNS];
+	size_t length = strftime(text, (size_t)COLUMNS, "%a %F %H:%M", timeinfo);
+
+	double seconds = timeinfo->tm_sec + (tv.tv_usec * 0.000001);
+
+	char finalText[COLUMNS];
+	snprintf(finalText, COLUMNS, " %s:%05.2f", text, seconds);
+
+	fprintf(stderr, "%s\n", finalText);
+
+
+	// Clear
+	for (size_t i = 0; i < TimeStampBuffer->Length(); ++i)
+	{
+		TimeStampMapping[i] = 0;
+	}
+
+
+	// Render text
+	char* textPtr = finalText;
+	int col = 0;
+	while (true)
+	{
+		char c = *textPtr++;
+		if (c == 0)
+			break;
+
+		if (c != ' ')
+		{
+			// Lookup descriptor
+			int entry = c - dejaVuSansMono_8ptFontInfo.StartCharacter;
+			//if (c >= '@')
+			//{
+			//	entry = c - '@' + 31;
+			//}
+
+			FONT_CHAR_INFO info = dejaVuSansMono_8ptDescriptors[entry];
+			const uint8_t* bitmap = dejaVuSansMono_8ptBitmaps + (entry * 12); //info.Offset;
+
+
+			for (int y = 0; y < 12; ++y)
+			{
+				uint8_t* dest = TimeStampMapping + ((y + 1) * WIDTH) + (col * 8);
+
+				uint8_t sample = *(bitmap + y);
+
+				uint8_t scan[8];
+				scan[0] = sample & 0x80 ? 0xff : 0x00;
+				scan[1] = sample & 0x40 ? 0xff : 0x00;
+				scan[2] = sample & 0x20 ? 0xff : 0x00;
+				scan[3] = sample & 0x10 ? 0xff : 0x00;
+
+				scan[4] = sample & 0x08 ? 0xff : 0x00;
+				scan[5] = sample & 0x04 ? 0xff : 0x00;
+				scan[6] = sample & 0x02 ? 0xff : 0x00;
+				scan[7] = sample & 0x01 ? 0xff : 0x00;
+
+				for (int i = 0; i < 8; ++i)
+				{
+					*dest++ = scan[i];
+				}
+			}
+		}
+
+		++col;
+	}
+
+
+	// blit
+	config_para_s config = { 0 };
+
+	//config.src_dst_type = ALLOC_OSD0; //ALLOC_ALLOC; //ALLOC_OSD0;
+	config.src_dst_type = ALLOC_ALLOC;
+	config.alu_const_color = 0xffffffff;
+
+	config.src_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_RGB; //GE2D_FORMAT_S8_Y;
+	config.src_planes[0].addr = TimeStampBuffer->PhysicalAddress();
+	config.src_planes[0].w = WIDTH;
+	config.src_planes[0].h = HEIGHT;
+	config.src_planes[1].addr = TimeStampBuffer->PhysicalAddress();
+	config.src_planes[1].w = WIDTH;
+	config.src_planes[1].h = HEIGHT;
+	config.src_planes[2].addr = TimeStampBuffer->PhysicalAddress();
+	config.src_planes[2].w = WIDTH;
+	config.src_planes[2].h = HEIGHT;
+
+	//config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_S32_ARGB; //GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
+	
+	config.dst_format = GE2D_LITTLE_ENDIAN | GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_M24_NV21; //GE2D_FORMAT_S32_ARGB;
+	config.dst_planes[0].addr = YuvDestination->PhysicalAddress();
+	config.dst_planes[0].w = width;
+	config.dst_planes[0].h = height;
+	config.dst_planes[1].addr = config.dst_planes[0].addr + (width * height);
+	config.dst_planes[1].w = width;
+	config.dst_planes[1].h = height / 2;
+
+	int io = ioctl(ge2d_fd, GE2D_CONFIG, &config);
+	if (io < 0)
+	{
+		throw Exception("GE2D_CONFIG failed");
+	}
+
+	// Perform the blit operation
+	ge2d_para_s blitRect = { 0 };
+
+	blitRect.src1_rect.x = 0;
+	blitRect.src1_rect.y = 0;
+	blitRect.src1_rect.w = WIDTH;
+	blitRect.src1_rect.h = HEIGHT;
+
+	blitRect.dst_rect.x = 0;
+	blitRect.dst_rect.y = 0;
+	blitRect.dst_rect.w = WIDTH;
+	blitRect.dst_rect.h = HEIGHT;
+
+	io = ioctl(ge2d_fd, GE2D_BLIT_NOALPHA, &blitRect);
+	if (io < 0)
+	{
+		throw Exception("GE2D_BLIT_NOALPHA failed.");
+	}
+}
 
 int main(int argc, char** argv)
 {
@@ -451,7 +610,7 @@ int main(int argc, char** argv)
 
 	
 	// GE2D
-	int ge2d_fd = open("/dev/ge2d", O_RDWR);
+	ge2d_fd = open("/dev/ge2d", O_RDWR);
 	if (ge2d_fd < 0)
 	{
 		throw Exception("open /dev/ge2d failed.");
@@ -652,6 +811,9 @@ int main(int argc, char** argv)
 
 			//printf("GE2D Blit OK.\n");
 
+
+			TimeStamp(width, height);
+
 			//YuvDestination->Sync();
 
 			encodeMutex.Unlock();
@@ -810,8 +972,10 @@ int main(int argc, char** argv)
 				}
 
 
-				//YuvDestination->Sync();
 
+				TimeStamp(width, height);
+
+				//YuvDestination->Sync();
 
 				encodeMutex.Unlock();
 			}
