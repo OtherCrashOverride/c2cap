@@ -91,7 +91,12 @@ public:
 		ion_allocation_data allocation_data = { 0 };
 		allocation_data.len = bufferSize;
 		allocation_data.heap_id_mask = ION_HEAP_CARVEOUT_MASK;
-		allocation_data.flags = ION_FLAG_CACHED_NEEDS_SYNC; //ION_FLAG_CACHED;
+
+#if defined(__aarch64__)
+		allocation_data.flags = ION_FLAG_CACHED;	//ION_FLAG_CACHED_NEEDS_SYNC
+#else
+		allocation_data.flags = 0;
+#endif
 
 		io = ioctl(ion_fd, ION_IOC_ALLOC, &allocation_data);
 		if (io != 0)
@@ -154,6 +159,8 @@ public:
 
 	void Sync()
 	{
+
+#if defined(__aarch64__)
 		ion_fd_data ionFdData = { 0 };
 		ionFdData.fd = ExportHandle();
 
@@ -162,5 +169,7 @@ public:
 		{
 			throw Exception("ION_IOC_SYNC failed.");
 		}
+#endif
+
 	}
 };

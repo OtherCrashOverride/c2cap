@@ -116,6 +116,7 @@ struct option longopts[] = {
 	{ "fps",			required_argument,	NULL,	'f' },
 	{ "bitrate",		required_argument,	NULL,	'b' },
 	{ "pixformat",		required_argument,	NULL,	'p' },
+	{ "timestamp",		no_argument,		NULL,	't' },
 	{ 0, 0, 0, 0 }
 };
 
@@ -224,13 +225,13 @@ void TimeStamp(int width, int height)
 	char finalText[COLUMNS];
 	snprintf(finalText, COLUMNS, " %s:%05.2f", text, seconds);
 
-	fprintf(stderr, "%s\n", finalText);
+	//fprintf(stderr, "%s\n", finalText);
 
 
 	// Clear
-	for (size_t i = 0; i < TimeStampBuffer->Length(); ++i)
+	for (size_t i = 0; i < TimeStampBuffer->Length() / 4; ++i)
 	{
-		TimeStampMapping[i] = 0;
+		((int*)TimeStampMapping)[i] = 0;
 	}
 
 
@@ -262,26 +263,37 @@ void TimeStamp(int width, int height)
 
 				uint8_t sample = *(bitmap + y);
 
-				uint8_t scan[8];
-				scan[0] = sample & 0x80 ? 0xff : 0x00;
-				scan[1] = sample & 0x40 ? 0xff : 0x00;
-				scan[2] = sample & 0x20 ? 0xff : 0x00;
-				scan[3] = sample & 0x10 ? 0xff : 0x00;
-
-				scan[4] = sample & 0x08 ? 0xff : 0x00;
-				scan[5] = sample & 0x04 ? 0xff : 0x00;
-				scan[6] = sample & 0x02 ? 0xff : 0x00;
-				scan[7] = sample & 0x01 ? 0xff : 0x00;
-
-				for (int i = 0; i < 8; ++i)
+				//for (int j = 0; j < 4; ++j)
 				{
-					*dest++ = scan[i];
+					//uint8_t sample = bigSample >> (8 * j);
+					//sample &= 0x000000ff;
+
+					uint8_t scan[8];
+					scan[0] = sample & 0x80 ? 0xff : 0x00;
+					scan[1] = sample & 0x40 ? 0xff : 0x00;
+					scan[2] = sample & 0x20 ? 0xff : 0x00;
+					scan[3] = sample & 0x10 ? 0xff : 0x00;
+
+					scan[4] = sample & 0x08 ? 0xff : 0x00;
+					scan[5] = sample & 0x04 ? 0xff : 0x00;
+					scan[6] = sample & 0x02 ? 0xff : 0x00;
+					scan[7] = sample & 0x01 ? 0xff : 0x00;
+
+					//for (int i = 0; i < 8; ++i)
+					//{
+					//	*dest++ = scan[i];
+					//}
+					*((uint32_t*)dest) = *((uint32_t*)scan);
+					dest += 4;
+					*((uint32_t*)dest) = *((uint32_t*)(scan + 4));
 				}
 			}
 		}
 
 		++col;
 	}
+
+	TimeStampBuffer->Sync();
 
 
 	// blit
@@ -331,11 +343,13 @@ void TimeStamp(int width, int height)
 	blitRect.dst_rect.w = WIDTH;
 	blitRect.dst_rect.h = HEIGHT;
 
-	io = ioctl(ge2d_fd, GE2D_BLIT_NOALPHA, &blitRect);
+	io = ioctl(ge2d_fd, GE2D_STRETCHBLIT_NOALPHA, &blitRect);
 	if (io < 0)
 	{
 		throw Exception("GE2D_BLIT_NOALPHA failed.");
 	}
+
+	
 }
 
 int main(int argc, char** argv)
@@ -351,9 +365,10 @@ int main(int argc, char** argv)
 	int fps = DEFAULT_FRAME_RATE;
 	int bitrate = DEFAULT_BITRATE;
 	PictureFormat pixformat = PictureFormat::Yuyv;
+	bool timeStamp = false;
 
 	int c;
-	while ((c = getopt_long(argc, argv, "d:o:w:h:f:b:p:", longopts, NULL)) != -1)
+	while ((c = getopt_long(argc, argv, "d:o:w:h:f:b:p:t", longopts, NULL)) != -1)
 	{
 		switch (c)
 		{
@@ -394,6 +409,10 @@ int main(int argc, char** argv)
 				{
 					throw Exception("Unknown pixformat.");
 				}
+				break;
+
+			case 't':
+				timeStamp = true;
 				break;
 
 			default:
@@ -760,7 +779,7 @@ int main(int argc, char** argv)
 #endif
 
 
-			//YuvSource->Sync();
+			YuvSource->Sync();
 
 
 			// Configure GE2D
@@ -811,10 +830,12 @@ int main(int argc, char** argv)
 
 			//printf("GE2D Blit OK.\n");
 
+			if (timeStamp)
+			{
+				TimeStamp(width, height);
+			}
 
-			TimeStamp(width, height);
-
-			//YuvDestination->Sync();
+			YuvDestination->Sync();
 
 			encodeMutex.Unlock();
 		}
@@ -919,7 +940,7 @@ int main(int argc, char** argv)
 
 				// Blit - convert YUV422 to NV12
 
-				//YuvSource->Sync();
+				YuvSource->Sync();
 
 
 				config_para_s config = { 0 };
@@ -972,10 +993,12 @@ int main(int argc, char** argv)
 				}
 
 
+				if (timeStamp)
+				{
+					TimeStamp(width, height);
+				}
 
-				TimeStamp(width, height);
-
-				//YuvDestination->Sync();
+				YuvDestination->Sync();
 
 				encodeMutex.Unlock();
 			}
