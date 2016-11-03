@@ -93,7 +93,7 @@ public:
 		allocation_data.heap_id_mask = ION_HEAP_CARVEOUT_MASK;
 
 #if defined(__aarch64__)
-		allocation_data.flags = ION_FLAG_CACHED;	//ION_FLAG_CACHED_NEEDS_SYNC
+		allocation_data.flags = ION_FLAG_CACHED_NEEDS_SYNC; //ION_FLAG_CACHED;
 #else
 		allocation_data.flags = 0;
 #endif

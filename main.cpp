@@ -344,6 +344,7 @@ void TimeStamp(int width, int height)
 	blitRect.dst_rect.h = HEIGHT;
 
 	io = ioctl(ge2d_fd, GE2D_STRETCHBLIT_NOALPHA, &blitRect);
+	//io = ioctl(ge2d_fd, GE2D_BLIT_NOALPHA, &blitRect);
 	if (io < 0)
 	{
 		throw Exception("GE2D_BLIT_NOALPHA failed.");
